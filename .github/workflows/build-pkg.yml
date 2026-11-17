@@ -1,0 +1,114 @@
+name: Build Garlic LLM pkg
+
+# Compila la app en Linux (Zig + OpenOrbis) y deja el .pkg como artefacto de la ejecución.
+# El pkg sale SIN modelos (unos 40 MB): los pesos van en /data de la consola (ver el resumen de cada ejecución).
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_args:
+        description: "Argumentos extra para build_chat.py (por ejemplo --4b). Vacío = Garlic LLM 9B"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "chat/**"
+      - "shaders/**"
+      - "build.py"
+      - "build_chat.py"
+      - ".github/workflows/build-pkg.yml"
+
+env:
+  OPENORBIS_TAG: v0.5.4
+  OPENORBIS_ASSET: toolchain-llvm-18.tar.gz
+  ZIG_VERSION: "0.13.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache del toolchain de OpenOrbis
+        id: oo
+        uses: actions/cache@v4
+        with:
+          path: toolchain/OpenOrbis
+          key: openorbis-${{ env.OPENORBIS_TAG }}-${{ env.OPENORBIS_ASSET }}
+
+      - name: Bajar OpenOrbis PS4 Toolchain
+        if: steps.oo.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p toolchain
+          curl -fsSL -o toolchain/oo.tar.gz \
+            "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/${OPENORBIS_TAG}/${OPENORBIS_ASSET}"
+          tar -xzf toolchain/oo.tar.gz -C toolchain
+          rm toolchain/oo.tar.gz
+
+      - name: Zig (desde PyPI) enlazado como toolchain/zig
+        shell: bash
+        run: |
+          pip install "ziglang==${ZIG_VERSION}"
+          ln -sfn "$(python -c 'import ziglang,os;print(os.path.dirname(ziglang.__file__))')" toolchain/zig
+          chmod +x toolchain/OpenOrbis/PS4Toolchain/bin/linux/*
+          toolchain/zig/zig version
+
+      # PkgTool.Core de OpenOrbis es .NET Core 3.0: necesita OpenSSL 1.1 (Ubuntu 24.04 solo trae la 3).
+      - name: libssl 1.1 para PkgTool
+        shell: bash
+        run: |
+          base=http://security.ubuntu.com/ubuntu/pool/main/o/openssl/
+          deb=$(curl -fsSL "$base" | grep -o 'libssl1.1_1.1.1f-1ubuntu2\.[0-9]*_amd64.deb' | sort -u | sort -V | tail -1)
+          echo "usando $deb"
+          curl -fsSLO "$base$deb"
+          mkdir -p "$RUNNER_TEMP/ssl11"
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/ssl11"
+
+      - name: Compilar y empaquetar
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: ${{ runner.temp }}/ssl11/usr/lib/x86_64-linux-gnu
+          CLR_OPENSSL_VERSION_OVERRIDE: "1.1"
+          EXTRA_ARGS: ${{ inputs.extra_args }}
+        run: python build_chat.py $EXTRA_ARGS 2>&1 | tee build.log
+
+      - name: Resumen
+        if: success()
+        shell: bash
+        run: |
+          ls -l build/chat/*.pkg
+          {
+            echo "### Pkg listo"
+            echo
+            echo '```'
+            ls -lh build/chat/*.pkg
+            echo '```'
+            echo "Este pkg **no trae los modelos**. La app los busca en \`/app0/models\` y luego en \`/data\`."
+            echo "Copia una sola vez a \`/data\` de la PS4 (FTP de GoldHEN, puerto 2121): \`qwen3.5-9b-q4s.bin\`, \`qwen3.5-9b-mtp.bin\`,"
+            echo "\`parakeet-v3-q4i.bin\`, \`chatterbox-t3.bin\` y \`chatterbox-s3gen-mf.bin\` (Hugging Face: garlic-llm/garlic-llm-ps4)."
+            echo "Después cada pkg nuevo pesa unos 40 MB."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir artefacto
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: garlic-llm-pkg-${{ github.run_number }}
+          path: build/chat/*.pkg
+          retention-days: 14
+
+      - name: Subir log del build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
