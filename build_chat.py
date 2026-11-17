@@ -37,7 +37,7 @@ MP_SOURCES = sorted([*(MP / "py").glob("*.c"), *(MP / "extmod").glob("*.c"), *(M
 MP_FLAGS = [f"-I{ROOT / 'chat' / 'py'}", f"-I{MP}", "-DNDEBUG", "-std=gnu99", "-fno-strict-aliasing",
             "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-but-set-variable"]
 LIBS = ["-lc", "-lm", "-lkernel", "-lSceGnmDriver", "-lSceVideoOut", "-lScePad", "-lSceUserService", "-lSceSysmodule",
-        "-lSceImeDialog", "-lSceCommonDialog", "-lSceAudioIn", "-lSceAudioOut", "-lSceSystemService", "-lSceNet"]
+        "-lSceImeDialog", "-lSceCommonDialog", "-lSceAudioIn", "-lSceAudioOut", "-lSceSystemService", "-lSceNet", "-lSceKeyboard"]
 
 
 def compile_all():
