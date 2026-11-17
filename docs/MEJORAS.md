@@ -13,6 +13,11 @@ Aviso: este pkg tiene el mismo TITLE_ID (`PSAI00001`) que el pkg completo de Hug
 
 Se probó el build de punta a punta en Linux (Zig 0.13.0 + OpenOrbis v0.5.4 + libssl 1.1). No se probó en la consola.
 
+## Antes de compilar (revisar a mano)
+1. `build_chat.py` debe compilar `chat/input.c` y `chat/files.c` (si toma `chat/*.c` solo, no hay nada que hacer; si tiene una lista, añádelos) y llevar `-lSceKeyboard` en `LIBS`. Eso no lo pude ver: el fork no venía en el zip.
+2. Los módulos nuevos (`input.c`, `files.c`) se compilaron contra los headers reales de OpenOrbis v0.5.4 y `files.c` se probó en un PC. `main.c` modificado NO se pudo compilar aquí (faltan `engine.h`, `ui.h`...): si el CI da error, el log dirá la línea.
+3. Aviso del TITLE_ID ya descrito arriba: este pkg reemplaza al completo de Hugging Face.
+
 ## Fase 0: base reproducible (hecha)
 `.github/workflows/build-pkg.yml`. Para cambiar versiones: `ZIG_VERSION`, `OPENORBIS_TAG` y `OPENORBIS_ASSET` arriba del archivo.
 
@@ -25,16 +30,14 @@ Se probó el build de punta a punta en Linux (Zig 0.13.0 + OpenOrbis v0.5.4 + li
 - El buffer `ids[8192]` limita lo que se puede releer de una vez, y releer cuesta tiempo de prefill (se ve en el log: "prompt of N tokens in X s").
 - "Sin contexto previo" ya es el comportamiento actual de △ (chat nuevo).
 
-## Fase 3: prompt de sistema editable
-`system_ids()` usa `tr(S_SYSTEM_PROMPT)`, y `sys_ids[]` es de 1024 tokens. Plan: si existe `/data/garlic_system.txt`, usarlo en su lugar (con ese tope).
+## Fase 3: prompt de sistema editable (hecha, sin probar en consola)
+Si existe `/data/garlic_system.txt` (UTF-8, hasta ~4 KB), se usa en lugar del prompt de fábrica; se lee en cada chat nuevo, así que se edita por FTP sin reiniciar. Ejemplo para usarla como ayudante de desarrollo: `docs/garlic_system.txt`.
 
-## Fase 4: archivos
-- El Python de la app está aislado a propósito: `open()` falla al leer y las escrituras no van a ningún lado (`chat/pyrun.c`, `garlic_open` y el BOOT).
-- Plan: un módulo propio `garlic_files` limitado a `/data/garlic_files/` (listar, leer, escribir), y una forma de pegar un archivo de texto en el chat (se cuenta contra los 16K tokens de contexto).
-- Subir archivos a la consola es por FTP; la app solo los lee de esa carpeta.
+## Fase 4: archivos (hecha en su versión mínima, sin probar en consola)
+Sube archivos de texto por FTP a `/data/garlic_files/` y menciónalos en un mensaje como `@build-pkg.yml`: su texto viaja al modelo antes de tu pregunta (el chat solo muestra lo que escribiste, más una nota "adjuntado / cortado / no encontrado"). Un mensaje que sea solo `@` lista los archivos. Límites: 14 000 bytes por mensaje (unos 4-5K tokens) y hasta 8 archivos; si no cabe, se corta en un salto de línea y la nota lo dice. El Python de la app sigue aislado a propósito. Pendiente: guardar el código de una respuesta como archivo, y una pantalla para elegir archivo con el mando.
 
-## Fase 5: teclado y mouse
-Hoy OPTIONS abre el teclado del sistema (`sceImeDialog`), que sirve para escribir con un teclado USB. Para teclado/mouse directo se puede reutilizar lo de tu psbrowser: `app/mouse.cpp` (carga `libSceMouse` en runtime con `sceKernelDlsym`, porque `orbis/Mouse.h` del toolchain son stubs vacíos) y el teclado con el sample `keyboard` de OpenOrbis (`-lSceKeyboard`). Ojo: el propio `mouse.cpp` se declara versión de diagnóstico (el layout de `SceMouseData` salió de memoria, no de logs); no encontré confirmación de que mouse y teclado USB funcionen en la consola, así que hay que probarlos antes de depender de ellos.
+## Fase 5: teclado y mouse USB (hecha, sin probar en consola)
+`chat/input.c/.h`, portado de tu psbrowser (mismo `mouse.cpp` por `sceKernelDlsym`; teclado con `sceKeyboard*`). En el chat: escribir cualquier tecla (o Enter) abre el teclado de la app con esa letra puesta; dentro, Enter envía y Esc cierra; Re Pág / Av Pág / flechas y la rueda hacen scroll; Esc detiene una respuesta; Ctrl+N = chat nuevo. Solo ASCII (como en el psbrowser: ñ y acentos no). El mouse solo usa la rueda por ahora. OPTIONS sigue abriendo el teclado del sistema.
 
 ## Fase 6: otras IAs
 - Los pesos están convertidos a formatos propios y los kernels (`shaders/`) son para Qwen, así que otra arquitectura exige kernels nuevos.

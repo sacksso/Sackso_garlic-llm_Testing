@@ -33,6 +33,10 @@
 #include "pyrun.h"
 #include "ui.h"
 #include "chatlog.h"
+#include <stdbool.h>   // (orbis/Keyboard.h uses bool)
+#include <orbis/Keyboard.h>
+#include "input.h"   // USB keyboard and mouse (from the psbrowser)
+#include "files.h"   // @name: text files from /data/garlic_files
 
 #define ASSETS "/app0/assets"
 #define IM_START eng.im_start   // <|im_start|> / <|im_end|> of the loaded model (model.idx)
@@ -668,11 +672,30 @@ static int sys_n, sys_pre;
 #define PY_FIX_MSG_TEXT tr(S_PY_FIX_MSG)
 #define PY_FIX_ASK_TEXT tr(S_PY_FIX_ASK)
 
+// /data/garlic_system.txt (UTF-8, up to ~4 KB / 1000 tokens) replaces the built-in system prompt; read again at every
+// new conversation, so it can be edited over FTP without restarting the app. Missing or empty: the built-in one.
+static char sysp_file[4096];
+
+static const char* system_prompt_text(void) {
+    int f = open("/data/garlic_system.txt", O_RDONLY);
+    if (f >= 0) {
+        int n = read(f, sysp_file, sizeof(sysp_file) - 1);
+        close(f);
+        if (n == (int)sizeof(sysp_file) - 1)   // too long: cut at the last line break (no half character)
+            while (n > 0 && sysp_file[n - 1] != '\n') n--;
+        if (n > 0) {
+            sysp_file[n] = 0;
+            return sysp_file;
+        }
+    }
+    return SYSTEM_PROMPT_TEXT;
+}
+
 static int system_ids(uint32_t* ids, int max) {
     int n = 0;
     ids[n++] = IM_START;
-    n = encode_into(ids, n, max, "system\n");
-    n = encode_into(ids, n, max, SYSTEM_PROMPT_TEXT);
+    n = encode_into(ids, n, max - 4, "system\n");   // (room kept for <|im_end|> and the line break)
+    n = encode_into(ids, n, max - 4, system_prompt_text());
     ids[n++] = IM_END;
     n = encode_into(ids, n, max, "\n");
     return n;
@@ -700,6 +723,8 @@ static void system_ahead(int tokens) {
     }
 }
 
+static const char* turn_files;   // text of the @files of this message (files.c), sent to the model but not shown
+
 static void start_turn(const char* user_text) {
     static uint32_t ids[8192];   // (with what is left of a thought turn's answer, hist_ids)
     int n = 0, max = 8192, think = think_on && !in_voice_mode && eng.qwen35;
@@ -725,6 +750,10 @@ static void start_turn(const char* user_text) {
     }
     ids[n++] = IM_START;
     n = encode_into(ids, n, max, "user\n");
+    if (turn_files && turn_files[0]) {   // the files go first, the question after them
+        n = encode_into(ids, n, max - 8, turn_files);
+        n = encode_into(ids, n, max - 8, "\n");
+    }
     n = encode_into(ids, n, max - 8, user_text);
     ids[n++] = IM_END;
     n = encode_into(ids, n, max, "\n");
@@ -1226,6 +1255,21 @@ static int voice_to_text(uint32_t button, DrawUnder under, char* text, int max) 
     return 1;
 }
 
+// A message the user wrote: @name words bring the files of /data/garlic_files along (files.h); a lone @ lists them.
+static void send_text(const char* text) {
+    static char ctx[14000];   // (about 4-5K tokens at most: ids[] in start_turn holds 8192)
+    char note[300];
+    int r = files_expand(text, ctx, sizeof(ctx), note, sizeof(note));
+    if (note[0]) {
+        Msg* m = msg_new(MSG_NOTE);
+        msg_append(m, note, strlen(note));
+    }
+    if (r < 0) return;   // only the list was asked for
+    turn_files = r > 0 ? ctx : NULL;
+    start_turn(text);
+    turn_files = NULL;
+}
+
 // ---- keyboard ----------------------------------------------------------------------------------------------------
 
 static Kb kb;
@@ -1286,6 +1330,18 @@ static int keyboard_ex(char* out, int max, int keep, int over_current) {
             prev = read_buttons();
         }
         if ((pressed & ORBIS_PAD_BUTTON_CROSS) && kb_press(&kb, out, max)) return out[0] != 0;
+        InKey ik;   // a USB keyboard types here too: Enter sends, Esc closes
+        while (input_key(&ik)) {
+            if (ik.code == ORBIS_KEYBOARD_KEY_ESCAPE) return 0;
+            if (ik.code == ORBIS_KEYBOARD_KEY_RETURN || ik.code == 88) {   // (88: the keypad's Enter)
+                if (out[0]) return 1;
+            } else if (ik.code == ORBIS_KEYBOARD_KEY_BACKSPACE) {
+                kb_backspace(out);
+            } else if (ik.ch && !(ik.mods & (ORBIS_KEYBOARD_MOD_LEFT_CTRL | ORBIS_KEYBOARD_MOD_RIGHT_CTRL | ORBIS_KEYBOARD_MOD_LEFT_ALT | ORBIS_KEYBOARD_MOD_RIGHT_ALT))) {
+                char one[2] = {(char)ik.ch, 0};
+                kb_append(out, max, one);
+            }
+        }
         draw_keyboard(&kb, out, now());
         if (toast_until > now()) {   // a dictation problem: show it over the keyboard too
             view_update();
@@ -1895,6 +1951,7 @@ int main(void) {
     sceUserServiceGetInitialUser(&user_id);
     scePadInit();
     g_pad = scePadOpen(user_id, 0, 0, NULL);
+    input_init(user_id);   // USB keyboard and mouse (failures only go to the log)
     int lang = 1;
     sceSystemServiceParamGetInt(ORBIS_SYSTEM_SERVICE_PARAM_ID_LANG, &lang);
     ui_lang = lang_from_system(lang);
@@ -1961,6 +2018,42 @@ int main(void) {
         uint32_t buttons = read_buttons();
         uint32_t pressed = buttons & ~prev;
         prev = buttons;
+        {   // USB mouse wheel and keyboard (the pad keeps working as before)
+            InMouse im;
+            if (input_mouse(&im) && im.wheel) {
+                int w = im.wheel * 70;   // wheel up = older messages, like the pad's Up
+                if (w > 0) view.scroll += w;
+                else view.scroll = view.scroll > -w ? view.scroll + w : 0;
+            }
+            InKey ik;
+            while (input_key(&ik)) {
+                const int ctrl = (ik.mods & (ORBIS_KEYBOARD_MOD_LEFT_CTRL | ORBIS_KEYBOARD_MOD_RIGHT_CTRL)) != 0;
+                const int alt = (ik.mods & (ORBIS_KEYBOARD_MOD_LEFT_ALT | ORBIS_KEYBOARD_MOD_RIGHT_ALT)) != 0;
+                if (ik.code == ORBIS_KEYBOARD_KEY_PGUP || ik.code == 82) {          // PgUp / Up arrow
+                    view.scroll += ik.code == 82 ? 60 : 400;
+                } else if (ik.code == ORBIS_KEYBOARD_KEY_PGDOWN || ik.code == 81) {  // PgDn / Down arrow
+                    int d = ik.code == 81 ? 60 : 400;
+                    view.scroll = view.scroll > d ? view.scroll - d : 0;
+                } else if (generating) {
+                    if (ik.code == ORBIS_KEYBOARD_KEY_ESCAPE) finish_turn(0);   // Esc = the pad's Circle
+                } else if (ctrl && ik.code == 17) {   // Ctrl+N = new chat (the pad's Triangle); 17 = the N key
+                    msgs_clear();
+                    pos = 0;
+                    need_close = 0;
+                    view.scroll = 0;
+                } else if (ik.code == ORBIS_KEYBOARD_KEY_RETURN || ik.code == 88 || (ik.ch && !ctrl && !alt)) {
+                    static char typed[2048];   // typing anything (or Enter) opens the keyboard; the key typed goes in
+                    typed[0] = 0;
+                    if (ik.ch && ik.code != ORBIS_KEYBOARD_KEY_RETURN) typed[0] = (char)ik.ch, typed[1] = 0;
+                    if (keyboard(typed, 1500, 1)) {
+                        say("user wrote %d bytes (USB keyboard)", (int)strlen(typed));
+                        send_text(typed);
+                    }
+                    prev = read_buttons();
+                    while (input_key(&ik)) {}   // (what is still queued was typed while the keyboard closed)
+                }
+            }
+        }
         if (generating) {
             if (pressed & ORBIS_PAD_BUTTON_CIRCLE) finish_turn(0);
             else generate_one();
@@ -1969,7 +2062,7 @@ int main(void) {
             int cross = (pressed & ORBIS_PAD_BUTTON_CROSS) != 0;
             if (cross ? keyboard(text, 1500, 0) : ask_user(text, sizeof(text))) {
                 say("user wrote %d bytes", (int)strlen(text));
-                start_turn(text);
+                send_text(text);
             }
             prev = read_buttons();
         } else if (pressed & ORBIS_PAD_BUTTON_L1) {
