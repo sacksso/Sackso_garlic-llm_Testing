@@ -32,6 +32,7 @@
 #include "tokenizer.h"
 #include "pyrun.h"
 #include "ui.h"
+#include "chatlog.h"
 
 #define ASSETS "/app0/assets"
 #define IM_START eng.im_start   // <|im_start|> / <|im_end|> of the loaded model (model.idx)
@@ -750,6 +751,8 @@ static void start_turn(const char* user_text) {
         start_turn(user_text);
         return;
     }
+    if (pos == 0) chatlog_begin();   // a new conversation: a new file in /data/chats (chatlog.h)
+    chatlog_add("user", user_text, 0);
     Msg* m = msg_new(MSG_USER);
     msg_append(m, user_text, strlen(user_text));
     msg_new(MSG_AI);
@@ -936,6 +939,7 @@ static void finish_turn(int ended_by_model) {
     say("reply of %d tokens (%s, %.1f tokens/s in the engine, %.1f on screen, T %.1f): %.300s", reply_tokens,
         ended_by_model ? "ended" : "stopped", view.tok_per_s, t_ans > 0 ? reply_tokens / t_ans : 0.0, view.temperature,
         msgs[n_msgs - 1].text);
+    chatlog_add("assistant", msgs[n_msgs - 1].text, !ended_by_model);
 #ifdef GARLIC_SPEC
     if (spec_active(&eng)) {
         char sl[300];
