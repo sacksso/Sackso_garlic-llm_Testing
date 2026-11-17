@@ -37,6 +37,8 @@
 #include <orbis/Keyboard.h>
 #include "input.h"   // USB keyboard and mouse (from the psbrowser)
 #include "files.h"   // @name: text files from /data/garlic_files
+#include "outfiles.h"   // /save: the named code blocks of the last answer go to /data/garlic_files/out
+#include "webcmd.h"    // /red /gh /url /web: network commands (off by default), and what they fetched
 
 #define ASSETS "/app0/assets"
 #define IM_START eng.im_start   // <|im_start|> / <|im_end|> of the loaded model (model.idx)
@@ -1258,14 +1260,40 @@ static int voice_to_text(uint32_t button, DrawUnder under, char* text, int max) 
 // A message the user wrote: @name words bring the files of /data/garlic_files along (files.h); a lone @ lists them.
 static void send_text(const char* text) {
     static char ctx[14000];   // (about 4-5K tokens at most: ids[] in start_turn holds 8192)
-    char note[300];
-    int r = files_expand(text, ctx, sizeof(ctx), note, sizeof(note));
+    char note[400];
+    if (outfiles_is_cmd(text)) {   // /save or /guardar: write the files of the newest answer; nothing goes to the model
+        int last = -1;
+        for (int i = n_msgs - 1; i >= 0 && last < 0; i--)
+            if (msgs[i].who == MSG_AI) last = i;
+        if (last < 0) snprintf(note, sizeof(note), "Nothing to save yet: there is no answer.");
+        else outfiles_save(msgs[last].text, note, sizeof(note));
+        say("save: %s", note);
+        Msg* nm = msg_new(MSG_NOTE);
+        msg_append(nm, note, strlen(note));
+        return;
+    }
+    if (webcmd_is_cmd(text)) {   // /red /gh /url /web /limpiar /ayuda: the result waits for the next message
+        double t0 = now();
+        webcmd_run(text, note, sizeof(note));
+        say("web: %s (%.2f s)", note, now() - t0);
+        Msg* nm = msg_new(MSG_NOTE);
+        msg_append(nm, note, strlen(note));
+        return;
+    }
+    int pl = webcmd_pending_len();   // text fetched earlier goes first, then the @files
+    double t0 = now();
+    int r = files_expand(text, ctx + pl, sizeof(ctx) - pl, note, sizeof(note));
+    if (note[0]) say("files: %s (%.2f s)", note, now() - t0);
     if (note[0]) {
         Msg* m = msg_new(MSG_NOTE);
         msg_append(m, note, strlen(note));
     }
-    if (r < 0) return;   // only the list was asked for
-    turn_files = r > 0 ? ctx : NULL;
+    if (r < 0) return;   // only the list was asked for (what was fetched keeps waiting)
+    if (pl > 0) {
+        webcmd_take_pending(ctx, pl);
+        say("web text attached: %d bytes", pl);
+    }
+    turn_files = (r > 0 || pl > 0) ? ctx : NULL;
     start_turn(text);
     turn_files = NULL;
 }

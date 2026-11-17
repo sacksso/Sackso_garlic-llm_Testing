@@ -33,8 +33,18 @@ Se probó el build de punta a punta en Linux (Zig 0.13.0 + OpenOrbis v0.5.4 + li
 ## Fase 3: prompt de sistema editable (hecha, sin probar en consola)
 Si existe `/data/garlic_system.txt` (UTF-8, hasta ~4 KB), se usa en lugar del prompt de fábrica; se lee en cada chat nuevo, así que se edita por FTP sin reiniciar. Ejemplo para usarla como ayudante de desarrollo: `docs/garlic_system.txt`.
 
-## Fase 4: archivos (hecha en su versión mínima, sin probar en consola)
-Sube archivos de texto por FTP a `/data/garlic_files/` y menciónalos en un mensaje como `@build-pkg.yml`: su texto viaja al modelo antes de tu pregunta (el chat solo muestra lo que escribiste, más una nota "adjuntado / cortado / no encontrado"). Un mensaje que sea solo `@` lista los archivos. Límites: 14 000 bytes por mensaje (unos 4-5K tokens) y hasta 8 archivos; si no cabe, se corta en un salto de línea y la nota lo dice. El Python de la app sigue aislado a propósito. Pendiente: guardar el código de una respuesta como archivo, y una pantalla para elegir archivo con el mando.
+## Fase 4: archivos (leer, zips y documentos, escribir: añadidas, sin probar en consola)
+Los comandos están resumidos en `docs/COMANDOS.md`.
+
+**Leer.** Sube archivos por FTP (GoldHEN, puerto 2121) a `/data/garlic_files/` y menciónalos como `@build-pkg.yml`: su texto viaja al modelo antes de tu pregunta (el chat muestra solo lo que escribiste y una nota "adjuntado / cortado / no encontrado"). Un `@` solo lista los archivos (también `out/` y `web/`). Subcarpetas: `@out/chat/foo.c`. Cualquier archivo de texto sirve; un binario se rechaza. Límites: 14 000 bytes por mensaje y hasta 8 archivos.
+
+**Zips y documentos** (`chat/zipread.c`, un inflate propio sin librerías). `@repo.zip` lista el árbol (oculta imágenes, modelos y archivos binarios, y quita la carpeta común `repo-main/`); `@repo.zip:chat/` o `@repo.zip:*.yml` filtra; `@repo.zip:ruta/archivo` trae un archivo (ruta completa, sin la carpeta raíz, o solo el nombre si es único). `@doc.docx`, `.pptx`, `.xlsx`, `.odt/.ods/.odp` traen el texto. No hay zip64, cifrado ni PDF. Solo se descomprime el principio de cada archivo.
+
+**Escribir.** `chat/outfiles.c`. `/guardar` guarda los bloques ``` con nombre de la última respuesta en `/data/garlic_files/out/` (conserva carpetas). Nombre: línea del bloque (```yaml ruta/x.yml), primera línea `# file: ruta`, o línea anterior con la ruta entre acentos graves. Solo escribe dentro de `out/`; máximo 12 archivos y 60 KB por orden.
+
+Prompt de sistema: `docs/garlic_system.txt` (copiar a `/data/garlic_system.txt`) enseña al modelo a etiquetar sus bloques y a no decir que tiene acceso a nada.
+
+Pendiente: pantalla para elegir archivo con el mando, PDF, resumir archivos que no caben en el contexto.
 
 ## Fase 5: teclado y mouse USB (hecha, sin probar en consola)
 `chat/input.c/.h`, portado de tu psbrowser (mismo `mouse.cpp` por `sceKernelDlsym`; teclado con `sceKeyboard*`). En el chat: escribir cualquier tecla (o Enter) abre el teclado de la app con esa letra puesta; dentro, Enter envía y Esc cierra; Re Pág / Av Pág / flechas y la rueda hacen scroll; Esc detiene una respuesta; Ctrl+N = chat nuevo. Solo ASCII (como en el psbrowser: ñ y acentos no). El mouse solo usa la rueda por ahora. OPTIONS sigue abriendo el teclado del sistema.
@@ -44,8 +54,10 @@ Sube archivos de texto por FTP a `/data/garlic_files/` y menciónalos en un mens
 - Opción realista: un modo "IA remota" con un cliente HTTP a un servidor OpenAI-compatible de tu red (Ollama, llama.cpp). HTTPS sí es posible: `libSceHttp` + `libSceSsl` del sistema, como hace `app/netclient.cpp` de tu psbrowser (probado en PS4 en su fase 0). Hay que añadir `-lSceSsl -lSceHttp` a `LIBS` en `build_chat.py`. La API que ya trae la app es el servidor; falta el cliente.
 - Ya existe un build 4B: `python build_chat.py --4b` (app aparte, `PSAI00002`).
 
-## Fase 7: integración con el navegador
-La PS4 no corre dos apps a la vez. Camino: una herramienta "buscar en la web" dentro de Garlic (descarga HTTP, extrae texto y se lo pasa al modelo), reutilizando código del navegador. Con `sceHttp` (como tu psbrowser) también sirve HTTPS. Para el modelo conviene texto limpio: `htmlToLines` de tu repo (104 líneas, hay que pasarlo a C) y buscadores en HTML (DuckDuckGo). Ojo: las páginas `/wiki/` de Wikipedia fallaban con 0x80431073, mientras `action=raw` funcionaba. Las cabeceras de OpenOrbis declaran `sceHttpSetRecvTimeOut`, `sceHttpSetResponseHeaderMaxSize` y `sceSslTerm` sin parámetros: hay que llamarlas con un cast, como hace `netclient.cpp`.
+## Fase 7: red para la IA (comandos hechos; falta el backend HTTPS)
+`chat/webcmd.c`, `chat/htmltext.c`, `chat/netget.h`. Interruptor `/red on|off` (apagado por defecto), `/gh usuario/repo [ruta]` (árbol y README, o un archivo, desde GitHub), `/url https://...` y `/web palabras` (DuckDuckGo HTML). El resultado se guarda en `/data/garlic_files/web/` y viaja al modelo con tu siguiente mensaje. Solo sale a la red lo que tú escribes.
+
+La capa está probada en PC con un servidor falso. Falta el backend real, `net_get()` (ver `chat/netget.h`): hasta entonces `chat/netget_stub.c` responde "no network backend". Se hace portando a C el `netclient.cpp` del psbrowser (`libSceHttp` + `libSceSsl`, con los casts que piden las cabeceras de OpenOrbis) y añadiendo `-lSceSsl -lSceHttp` a `LIBS` en `build_chat.py`; la versión fuerte reemplaza a la débil sin tocar nada más. Ojo: la pantalla del chat espera mientras se descarga, así que el backend debe tener su propio timeout (unos 15 s). Wikipedia: las páginas `/wiki/` fallaban con 0x80431073 y `action=raw` funcionaba.
 
 ## Fase 8: ver fotos
 Es la más difícil: hace falta un codificador de visión (kernels y pesos nuevos) y memoria de GPU que el 9B casi no deja libre. Lo probable es un modo aparte o el modelo de 4B. Se evalúa al final.
