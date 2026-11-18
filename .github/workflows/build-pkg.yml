@@ -39,6 +39,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Pruebas en el PC (fase 7; no bloquea el build)
+        continue-on-error: true
+        shell: bash
+        run: bash tests/host_tests.sh
+
       - name: Cache del toolchain de OpenOrbis
         id: oo
         uses: actions/cache@v4
