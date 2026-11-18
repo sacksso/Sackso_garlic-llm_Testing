@@ -13,6 +13,7 @@
 #include "repomap.h"
 #include "zipwrite.h"
 #include "progress.h"
+#include "workspace.h"
 
 #define FBUF (200 * 1024)
 #define MAX_BLOCKS 16
@@ -78,7 +79,8 @@ static int word_is(const char* t, int tl, const char* lit) {
 }
 
 static const char* const NAMES[] = {"proyecto", "project", "mapa", "map", "grep", "grep", "aplicar", "apply",
-                                    "empaquetar", "zip", "auto", "limite", "limit", NULL};
+                                    "empaquetar", "zip", "auto", "limite", "limit", "proyectos", "projects",
+                                    "instrucciones", "instructions", NULL};
 
 // Which command (index into NAMES) and where its arguments start. -1 when text is none of them.
 static int parse(const char* text, const char** args) {
@@ -207,6 +209,130 @@ static int apply_reply(const char* reply, char* report, int rmax, int* ok, int* 
     return nb;
 }
 
+// ---- projects (phase 9) ----
+static void name_from_zip(const char* zip, char* out, int max) {
+    int n = 0;
+    for (const char* p = zip; *p && n < max - 1 && n < 40; p++) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') out[n++] = c;
+        else if (n > 0 && out[n - 1] != '-') out[n++] = '-';
+    }
+    if (n > 4 && !strncmp(out + n - 4, ".zip", 4)) n -= 4;
+    while (n > 0 && (out[n - 1] == '-' || out[n - 1] == '.')) n--;
+    while (n > 0 && out[0] == '.') memmove(out, out + 1, n--);
+    out[n] = 0;
+}
+
+// The ledger of the project we leave is saved, the one of the project we enter is read, and the model hears about the
+// project with the next message.
+static void ws_before(void) {
+    if (progress_has()) progress_save();
+}
+
+static void ws_after(void) {
+    static char ctx[3000];
+    progress_clear();
+    progress_load();
+    files_set_project(ws_base_zip());
+    save();
+    int n = ws_context_text(ctx, sizeof(ctx));
+    if (n > 0) pend("[Proyecto]", ctx, n);
+}
+
+static void cmd_project(const char* args, char* note, int nm) {
+    if (!args[0]) {
+        if (ws_name()[0])
+            snprintf(note, nm, "Project: %s%s%s. Files: %s. /proyectos lists them, /proyecto nuevo NAME makes one, /proyecto salir leaves it.", ws_name(),
+                     ws_base_zip()[0] ? " (base zip: " : "", ws_base_zip()[0] ? ws_base_zip() : "", ws_out_dir());
+        else
+            snprintf(note, nm, files_project()[0] ? "Repo zip: %s. No project yet: /proyecto nuevo NAME keeps what the AI creates apart."
+                                                  : "No project. /proyecto nuevo NAME makes one (or put a repo .zip in /data/garlic_files and type /proyecto name.zip).",
+                     files_project());
+        return;
+    }
+    int w1 = 0;
+    while (args[w1] && args[w1] != ' ' && args[w1] != '\n') w1++;
+    const char* rest = args + w1;
+    while (*rest == ' ') rest++;
+    if (word_is(args, w1, "nuevo") || word_is(args, w1, "new") || word_is(args, w1, "crear")) {
+        char name[60];
+        int k = 0;
+        while (rest[k] && rest[k] != ' ' && rest[k] != '\n' && k < 58) name[k] = rest[k], k++;
+        name[k] = 0;
+        const char* zarg = rest + k;
+        while (*zarg == ' ') zarg++;
+        char zip[100] = "", sugg[300];
+        if (zarg[0] && !files_resolve_zip(zarg, zip, sizeof(zip), sugg, sizeof(sugg))) {
+            snprintf(note, nm, "No such zip: %s", sugg);
+            return;
+        }
+        if (!ws_valid_name(name)) {
+            snprintf(note, nm, "Usage: /proyecto nuevo NAME [repo.zip]  (NAME: letters, digits . _ - , up to 40)");
+            return;
+        }
+        ws_before();
+        int rc = ws_create(name, zip);
+        if (rc == -2) {
+            snprintf(note, nm, "A project called %s already exists: /proyecto %s opens it.", name, name);
+            return;
+        }
+        if (rc != 0) {
+            snprintf(note, nm, "Could not create the project (is /data writable?).");
+            return;
+        }
+        ws_after();
+        snprintf(note, nm, "Project %s created and active%s%s. What the AI writes goes to %s. /instrucciones adds instructions for it.", name,
+                 zip[0] ? ", base zip " : "", zip, ws_out_dir());
+        return;
+    }
+    if (word_is(args, w1, "salir") || word_is(args, w1, "ninguno") || word_is(args, w1, "none") || word_is(args, w1, "off")) {
+        ws_before();
+        ws_leave();
+        progress_clear();
+        progress_load();
+        save();
+        snprintf(note, nm, "No project: files go to the shared %s again.", ws_out_dir());
+        return;
+    }
+    char tok[60];
+    snprintf(tok, sizeof(tok), "%.*s", w1 < 58 ? w1 : 58, args);
+    if (ws_exists(tok)) {
+        if (!strcmp(tok, ws_name())) {
+            snprintf(note, nm, "Project %s is already the active one.", tok);
+            return;
+        }
+        ws_before();
+        ws_switch(tok);
+        ws_after();
+        snprintf(note, nm, "Project %s is now active (files in %s). Its list and instructions go with your next message; press Triangle for a new chat so the model reads them in its system prompt.", tok,
+                 ws_out_dir());
+        return;
+    }
+    char name[100], sugg[300];
+    if (!files_resolve_zip(args, name, sizeof(name), sugg, sizeof(sugg))) {
+        snprintf(note, nm, "No project or zip called that. %s. /proyecto nuevo NAME makes a project; /proyectos lists them.", sugg);
+        return;
+    }
+    if (ws_name()[0]) {   // a zip while a project is active: it becomes the project's base repo
+        ws_set_base_zip(name);
+        files_set_project(name);
+        save();
+        snprintf(note, nm, "Project %s is now based on %s. \"@zip\" means it: /mapa shows it, /grep words searches it.", ws_name(), name);
+        return;
+    }
+    char pn[60];
+    name_from_zip(name, pn, sizeof(pn));
+    if (!ws_valid_name(pn)) snprintf(pn, sizeof(pn), "proyecto");
+    ws_before();
+    if (ws_exists(pn)) ws_switch(pn);
+    else ws_create(pn, name);
+    ws_set_base_zip(name);
+    ws_after();
+    snprintf(note, nm, "Project %s (based on %s) is active. \"@zip\" means the zip: /mapa shows it, /grep words searches it. What the AI writes goes to %s.", ws_name(),
+             name, ws_out_dir());
+}
+
 // ---- commands ----
 int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
     load();
@@ -214,21 +340,16 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
     int c = parse(text, &args);
     note[0] = 0;
     if (c <= 1) {   // /proyecto
-        if (!args[0]) {
-            snprintf(note, nm, files_project()[0] ? "Project: %s. Change it with /proyecto name.zip" : "No project. Put a repo .zip in /data/garlic_files and type /proyecto name (or /gh owner/repo zip with /red on).", files_project());
-            return 0;
-        }
-        char name[100], sugg[300];
-        if (!files_resolve_zip(args, name, sizeof(name), sugg, sizeof(sugg))) {
-            snprintf(note, nm, "No such zip: %s", sugg);
-            return 0;
-        }
-        files_set_project(name);
-        save();
-        snprintf(note, nm, "Project: %s. Now \"@zip\" means it: ask for the map with /mapa, or search with /grep words.", name);
+        cmd_project(args, note, nm);
+        return 0;
     } else if (c <= 3) {   // /mapa
+        static char wsc[3000];
+        int wn = ws_context_text(wsc, sizeof(wsc));
         if (!files_project()[0]) {
-            snprintf(note, nm, "No project. Use /proyecto name.zip first.");
+            if (wn > 0) {
+                pend("[Proyecto]", wsc, wn);
+                snprintf(note, nm, "Project %s: its instructions and file list (%d bytes) go with your next message.", ws_name(), wn);
+            } else snprintf(note, nm, "No project. Use /proyecto nuevo NAME or /proyecto name.zip first.");
             return 0;
         }
         char zp[200];
@@ -238,8 +359,9 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
         int n = repomap_build(zp, map, 12000, &ns);
         if (n < 0) snprintf(note, nm, "Cannot read %s", files_project());
         else {
+            if (wn > 0 && n + wn + 2 < (int)sizeof(map)) n += snprintf(map + n, sizeof(map) - n, "\n%s", wsc);
             pend("[Repo map]", map, n);
-            snprintf(note, nm, "Map of %s: %d source files, %d bytes. It goes with your next message.", files_project(), ns, n);
+            snprintf(note, nm, "Map of %s: %d source files, %d bytes%s. It goes with your next message.", files_project(), ns, n, wn > 0 ? " (with the project's own files)" : "");
         }
     } else if (c <= 5) {   // /grep
         if (!files_project()[0] || !args[0]) {
@@ -258,12 +380,20 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
         }
     } else if (c <= 7) {   // /aplicar
         static char rep[3000];
-        int ok, bad;
+        int ok = 0, bad = 0;
         int nb = last_ai && last_ai[0] ? apply_reply(last_ai, rep, sizeof(rep), &ok, &bad) : 0;
-        if (nb == 0) snprintf(note, nm, "The last answer has no edit blocks (BUSCAR / REEMPLAZAR).");
-        else snprintf(note, nm, "%d applied, %d failed (files in /data/garlic_files/out, log in CAMBIOS.txt):\n%.1000s", ok, bad, rep);
+        char fnote[400] = "";
+        int nf = last_ai && last_ai[0] ? outfiles_save(last_ai, fnote, sizeof(fnote)) : 0;
+        if (nf > 0) {
+            char lg[420];
+            snprintf(lg, sizeof(lg), "GUARDADO %s\n", fnote);
+            log_change(lg);
+        }
+        if (nb == 0 && nf == 0) snprintf(note, nm, "The last answer has no edit blocks (BUSCAR / REEMPLAZAR) and no named files (\"Archivo: path\" with a code block under it).");
+        else snprintf(note, nm, "%d edit(s) applied, %d failed; %d file(s) saved (files in %s, log in CAMBIOS.txt):\n%.600s%s%.600s", ok, bad, nf, OUT_DIR, rep, nf ? "\n" : "", fnote);
     } else if (c <= 9) {   // /empaquetar
         char name[80] = "cambios", zp[200];
+        if (ws_name()[0]) snprintf(name, sizeof(name), "%s", ws_name());
         if (args[0]) {
             int k = 0;
             for (; args[k] && args[k] != ' ' && k < 70; k++) name[k] = args[k] == '/' ? '_' : args[k];
@@ -273,7 +403,7 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
         snprintf(zp, sizeof(zp), FILES_DIR "/%s.zip", name);
         long bytes = 0;
         int n = zipwrite_dir(OUT_DIR, zp, &bytes);
-        if (n == -2) snprintf(note, nm, "Nothing to pack: /data/garlic_files/out is empty.");
+        if (n == -2) snprintf(note, nm, "Nothing to pack: %s is empty.", OUT_DIR);
         else if (n < 0) snprintf(note, nm, "Could not create %s", zp);
         else snprintf(note, nm, "Packed %d files (%ld bytes) into %s: take it over FTP.", n, bytes, zp);
     } else if (c == 10) {   // /auto
@@ -287,6 +417,33 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
         }
         snprintf(note, nm, "Auto: %s, up to %d rounds per message. (The agent applies edits and brings the files the answer asks for; network only if /red on.)",
                  g_auto ? "ON" : "off", g_rounds);
+    } else if (c == 13 || c == 14) {   // /proyectos
+        static char lst[2500];
+        int n = ws_list(lst, sizeof(lst));
+        if (n == 0) snprintf(note, nm, "No projects yet. /proyecto nuevo NAME makes one.");
+        else snprintf(note, nm, "Projects (* = active; files in /data/garlic_files/out/NAME):\n%s/proyecto NAME opens one.", lst);
+    } else if (c == 15 || c == 16) {   // /instrucciones
+        if (!ws_name()[0]) {
+            snprintf(note, nm, "No project. /proyecto nuevo NAME first: the instructions belong to a project.");
+            return 0;
+        }
+        static char ins[1700];
+        if (!args[0]) {
+            if (ws_instructions(ins, sizeof(ins)) > 0) snprintf(note, nm, "Instructions of %s:\n%.900s\n(/instrucciones new text replaces them, /instrucciones borrar removes them.)", ws_name(), ins);
+            else snprintf(note, nm, "Project %s has no instructions. /instrucciones text... sets them (e.g. language, style, what the project is). You can also edit /data/garlic_projects/%s/INSTRUCCIONES.md over FTP.", ws_name(), ws_name());
+            return 0;
+        }
+        if (word_is(args, (int)strlen(args), "borrar") || word_is(args, (int)strlen(args), "clear")) {
+            ws_set_instructions("");
+            snprintf(note, nm, "Instructions of %s removed.", ws_name());
+            return 0;
+        }
+        snprintf(ins, sizeof(ins), "%s", args);
+        ws_set_instructions(ins);
+        static char ctx[3000];
+        int n = ws_context_text(ctx, sizeof(ctx));
+        if (n > 0) pend("[Proyecto]", ctx, n);
+        snprintf(note, nm, "Instructions of %s saved (%d chars). They go with your next message; a new chat (Triangle) puts them in the system prompt.", ws_name(), (int)strlen(ins));
     } else {   // /limite
         if (args[0]) {
             g_limit = atoi(args);
@@ -306,18 +463,34 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
     note[0] = 0;
     next_msg[0] = 0;
     if (!g_auto || !reply || !reply[0]) return 0;
+    int has_patch = patch_has_blocks(reply);
+    int nfiles = outfiles_count(reply);   // phase 9: whole files ("Archivo: path" + a code block) are saved by the agent too
     if (g_round_now >= g_rounds) {
-        if (patch_has_blocks(reply) || ask_collect(reply, (char[2]){0}, 1, (char[2]){0}, 1) > 0)
+        if (has_patch || nfiles > 0 || ask_collect(reply, (char[2]){0}, 1, (char[2]){0}, 1) > 0)
             snprintf(note, note_max, "Auto: round limit (%d) reached. Type /aplicar or /ok yourself.", g_rounds);
         return 0;
     }
-    if (patch_has_blocks(reply)) {
+    if (has_patch || nfiles > 0) {
         static char rep[3000];
-        int ok, bad;
-        apply_reply(reply, rep, sizeof(rep), &ok, &bad);
+        int ok = 0, bad = 0;
+        rep[0] = 0;
+        if (has_patch) apply_reply(reply, rep, sizeof(rep), &ok, &bad);
+        else g_warn[0] = 0, g_warn_n = 0;
+        int nf = 0;
+        if (nfiles > 0) {
+            char fnote[400] = "";
+            nf = outfiles_save(reply, fnote, sizeof(fnote));
+            if (nf > 0) {
+                char lg[420];
+                snprintf(lg, sizeof(lg), "GUARDADO %s\n", fnote);
+                log_change(lg);
+            }
+        }
         g_round_now++;
+        char fpart[80] = "";
+        if (nf > 0) snprintf(fpart, sizeof(fpart), ", %d file(s) saved", nf);
         if (!bad && g_warn_n) {   // applied, but the brackets no longer add up: the model looks at it once
-            snprintf(note, note_max, "Auto: %d edit(s) applied, but the brackets changed (%s). Telling the model.", ok, g_warn_n > 1 ? "several files" : "see CAMBIOS.txt");
+            snprintf(note, note_max, "Auto: %d edit(s) applied%s, but the brackets changed (%s). Telling the model.", ok, fpart, g_warn_n > 1 ? "several files" : "see CAMBIOS.txt");
             snprintf(next_msg, next_max,
                      "Los cambios se aplicaron, pero la comprobacion de llaves avisa (abiertos menos cerrados, frente a antes):\n%s"
                      "Un cambio normal no cambia esos numeros. Revisa tu ultimo bloque: ¿falta o sobra un }, ) o ]? "
@@ -326,10 +499,11 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
             return 1;
         }
         if (!bad) {
-            snprintf(note, note_max, "Auto: %d edit(s) applied in /data/garlic_files/out (log: CAMBIOS.txt). /empaquetar makes one zip.", ok);
+            if (has_patch) snprintf(note, note_max, "Auto: %d edit(s) applied%s in %s (log: CAMBIOS.txt). /empaquetar makes one zip.", ok, fpart, OUT_DIR);
+            else snprintf(note, note_max, "Auto: %d file(s) saved in %s. /empaquetar makes one zip.", nf, OUT_DIR);
             return 0;
         }
-        snprintf(note, note_max, "Auto: %d applied, %d failed. Telling the model.", ok, bad);
+        snprintf(note, note_max, "Auto: %d applied, %d failed%s. Telling the model.", ok, bad, fpart);
         snprintf(next_msg, next_max,
                  "Resultado de aplicar tus cambios (%d bien, %d fallaron):\n%s\nReenvia SOLO los bloques que fallaron, copiando el texto de BUSCAR exactamente del archivo.",
                  ok, bad, rep);
@@ -361,27 +535,28 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
 
 const char* devcmd_system_prompt(void) {
     return
-           "Eres un asistente de programación en una PS4, sin internet. Respondes en el idioma del usuario, breve y concreto. No puedes abrir archivos: la app te los da.\n"
+           "Eres un asistente de programación en una PS4, sin internet. Respondes en el idioma del usuario, breve y concreto. No puedes abrir archivos: la app te los da. Tampoco guardas nada tú: la app guarda lo que escribes en bloques de archivo.\n"
            "\n"
            "CÓMO TRABAJAS\n"
            "1. Entiende la petición. Si no tienes el código, pídelo antes de opinar; no adivines lo que no has visto.\n"
            "2. Pide lo mínimo, máx. 3 líneas, solo la petición y nada más: por ejemplo @zip:chat/main.c#send_text, @zip:chat/files.c:100-180 o @zip?dns+tls. Un @zip solo es el mapa del repo. No pidas archivos enteros grandes ni repitas lo que ya te llegó; si llegó cortado, pide el rango que falta.\n"
            "3. Usa solo rutas que aparezcan en el mapa; los ejemplos de arriba no son archivos de este proyecto.\n"
-           "4. Cambia solo lo necesario, un bloque por cambio:\n"
+           "4. Cambiar un archivo que existe, un bloque por cambio:\n"
            "Archivo: chat/ask.c\n"
            "<<<<<<< BUSCAR\n"
            "    int a = 1;\n"
            "=======\n"
            "    int a = 2;\n"
            ">>>>>>> REEMPLAZAR\n"
-           "BUSCAR se copia tal cual del código que viste (misma sangría) y debe ser único. Archivo nuevo: BUSCAR vacío. Varios cambios, varios bloques.\n"
-           "5. Después de los bloques: una línea con lo que cambiaste y otra con cómo comprobarlo. Si el cambio exige tocar otro archivo (cabecera, llamadas), pídelo o cámbialo también.\n"
+           "BUSCAR se copia tal cual del código que viste (misma sangría) y debe ser único. Varios cambios, varios bloques.\n"
+           "5. CREAR un archivo (un .yml, un .md, un script, un proyecto nuevo): una línea \"Archivo: ruta/nombre.ext\" y debajo un bloque ``` con TODO su contenido; un bloque por archivo. La app los guarda sola (o con /aplicar). Si son varios archivos grandes, entrega uno por respuesta y di cuál sigue (una respuesta larga se corta). Nunca digas que no puedes crear archivos, carpetas ni zips: /empaquetar hace el zip.\n"
+           "6. Después: una línea con lo que hiciste y otra con cómo comprobarlo. Si el cambio exige tocar otro archivo (cabecera, llamadas), pídelo o cámbialo también.\n"
            "\n"
            "REGLAS\n"
            "- Ante un error: la causa primero, luego el cambio mínimo. No reescribas lo que funciona.\n"
            "- Respeta el estilo del proyecto. No inventes funciones, APIs ni versiones; si dudas, dilo y di qué comprobarías.\n"
+           "- No inventes cómo funciona esta app ni sus comandos: si no lo viste, dilo (la lista está en /ayuda).\n"
            "- Si la app dice que un bloque falló, reenvía solo ese, copiando el texto que ella te muestra. Si avisa de que las llaves no cuadran, revisa tu último bloque.\n"
            "- Si el mensaje empieza con [REINICIO], el contexto se reinició: sigue desde TUS NOTAS sin repetir lo hecho.\n"
-           "- Código nuevo sin repo: un solo bloque ``` completo y ejecutable, con el lenguaje indicado.\n"
            "- Si algo llegó cortado, avisa.\n";
 }

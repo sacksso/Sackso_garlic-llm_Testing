@@ -32,6 +32,22 @@ int ask_is_plain_yes(const char* text) {
     return eq_word(text, "ok") || eq_word(text, "si") || eq_word(text, "sí") || eq_word(text, "dale") || eq_word(text, "vale");
 }
 
+// "@zip:ruta", "@zip:ruta:lineas", "@zip?palabras": the words of a format description, not a file of the project.
+static int placeholder(const char* tok) {
+    static const char* const BAD[] = {"ruta", "path", "archivo", "file", "nombre", "name", "lineas", "funcion", "palabras", "words", "ruta/archivo", "ruta/del/archivo", "path/to/file", NULL};
+    const char* s = strpbrk(tok, ":?");
+    if (!s) return 0;
+    s++;
+    char part[64];
+    int l = 0;
+    while (s[l] && s[l] != ':' && s[l] != '#' && l < 62) part[l] = (char)lc((unsigned char)s[l]), l++;
+    part[l] = 0;
+    for (int i = 0; BAD[i]; i++)
+        if (!strcmp(part, BAD[i])) return 1;
+    l = (int)strlen(part);
+    return (l > 5 && !strncmp(part, "ruta/", 5) && !strchr(part + 5, '.')) || !strncmp(part, "ruta/del/", 9);
+}
+
 int ask_collect(const char* reply, char* files, int files_max, char* webs, int webs_max) {
     files[0] = 0;
     webs[0] = 0;
@@ -71,7 +87,7 @@ int ask_collect(const char* reply, char* files, int files_max, char* webs, int w
         while (l > 0 && (tok[l - 1] == '.' || tok[l - 1] == ':' || tok[l - 1] == '-' || tok[l - 1] == '?' || tok[l - 1] == '+' || tok[l - 1] == '#')) tok[--l] = 0;   // sentence punctuation
         // a file ("name.ext"), or the zip alias with a request: "@zip:path", "@zip?words", "@repo#..." (not @Override, @param, emails...)
         int alias = (!strncmp(tok, "zip", 3) || !strncmp(tok, "repo", 4)) && (strchr(tok, ':') || strchr(tok, '?'));
-        if (l < 3 || (!strchr(tok, '.') && !alias) || strstr(tok, "..") || tok[0] == '/' || tok[0] == '*') continue;
+        if (l < 3 || placeholder(tok) || (!strchr(tok, '.') && !alias) || strstr(tok, "..") || tok[0] == '/' || tok[0] == '*') continue;
         char item[104];
         int il = snprintf(item, sizeof(item), "@%s ", tok);
         if (strstr(files, item) || nf >= 6 || fl + il >= files_max) continue;

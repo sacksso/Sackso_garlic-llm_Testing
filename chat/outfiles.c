@@ -61,16 +61,26 @@ static int starts_ci(const char* t, const char* lit) {   // case-insensitive pre
     return 1;
 }
 
-static void mkdirs(const char* rel) {
-    char dir[160];
+static void mkdir_p(const char* path) {
+    char p[300];
+    snprintf(p, sizeof(p), "%s", path);
+    for (char* q = p + 1; *q; q++)
+        if (*q == '/') {
+            *q = 0;
+            mkdir(p, 0777);
+            *q = '/';
+        }
+    mkdir(p, 0777);
+}
+
+static void mkdirs(const char* rel) {   // the folders of OUT_DIR/rel
+    char dir[300];
     snprintf(dir, sizeof(dir), "%s", OUT_DIR);
-    mkdir("/data/garlic_files", 0777);
-    mkdir(dir, 0777);
-    int l = (int)strlen(dir);
+    mkdir_p(dir);
     for (const char* p = rel; *p; p++) {
-        if (*p == '/' && l + (p - rel) < (int)sizeof(dir) - 1) {
-            char sub[160];
-            snprintf(sub, sizeof(sub), "%s/%.*s", OUT_DIR, (int)(p - rel), rel);
+        if (*p == '/' && (int)strlen(dir) + (int)(p - rel) < (int)sizeof(dir) - 1) {
+            char sub[300];
+            snprintf(sub, sizeof(sub), "%s/%.*s", dir, (int)(p - rel), rel);
             mkdir(sub, 0777);
         }
     }
@@ -127,7 +137,7 @@ static void note_add(char* note, int max, const char* fmt, const char* a, long b
     snprintf(note + l, max - l, fmt, a, b);
 }
 
-int outfiles_save(const char* reply, char* note, int note_max) {
+static int save_impl(const char* reply, char* note, int note_max, int dry) {
     note[0] = 0;
     static char body[MAX_BYTES + 1];
     int written = 0, unnamed = 0, bad = 0, edits = 0;
@@ -188,6 +198,16 @@ int outfiles_save(const char* reply, char* note, int note_max) {
                     }
                     t = e + 1;
                 }
+                if (!have) {   // "Archivo: path/name.ext" (or "File: ...") with no backticks, the way the edit blocks name a file
+                    for (const char* t2 = prev_line; t2 < lend && !have; t2++) {
+                        int off = starts_ci(t2, "archivo:") ? 8 : starts_ci(t2, "file:") ? 5 : 0;
+                        char cand[PATH_MAX_LEN] = {0};
+                        if (off && pick_path(t2 + off, (int)(lend - t2 - off), cand)) {
+                            strcpy(name, cand);
+                            have = 1;
+                        }
+                    }
+                }
             }
             {   // the model sometimes writes "```yaml", the name line and then another "```yaml": the first block is only the
                 // name, and the line that looked like its closing fence opens the real one
@@ -220,7 +240,7 @@ int outfiles_save(const char* reply, char* note, int note_max) {
                 for (int i = 0; i < blen; i++)
                     if (b[i] != '\r') body[n++] = b[i];
                 if (n > 0 && body[n - 1] != '\n') body[n++] = '\n';
-                if (write_file(name, body, n) == 0) {
+                if (dry || write_file(name, body, n) == 0) {
                     written++;
                     note_add(note, note_max, "%s (%ld B). ", name, n);
                 } else bad++;
@@ -235,7 +255,7 @@ int outfiles_save(const char* reply, char* note, int note_max) {
     }
     char tail[160];
     tail[0] = 0;
-    if (written) snprintf(tail, sizeof(tail), "Saved %d in " OUT_DIR ". ", written);
+    if (written) snprintf(tail, sizeof(tail), "Saved %d in %s. ", written, OUT_DIR);
     else if (edits) snprintf(tail, sizeof(tail), "Nothing saved as a file: the answer holds edit blocks, use /aplicar. ");
     else snprintf(tail, sizeof(tail), "Nothing saved: no named code block in the last answer. ");
     char all[320];
@@ -246,4 +266,11 @@ int outfiles_save(const char* reply, char* note, int note_max) {
     if (edits && written && l < note_max - 1) l += snprintf(note + l, note_max - l, "%d edit block(s) left for /aplicar. ", edits);
     if (bad && l < note_max - 1) snprintf(note + l, note_max - l, "%d block(s) not saved (too big, too many or write error). ", bad);
     return written;
+}
+
+int outfiles_save(const char* reply, char* note, int note_max) { return save_impl(reply, note, note_max, 0); }
+
+int outfiles_count(const char* reply) {
+    char note[400];
+    return save_impl(reply, note, sizeof(note), 1);
 }

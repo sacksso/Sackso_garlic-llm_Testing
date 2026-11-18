@@ -8,7 +8,8 @@
 #define OUTFILES_H
 
 #ifndef OUT_DIR
-#define OUT_DIR "/data/garlic_files/out"
+#include "workspace.h"
+#define OUT_DIR ws_out_dir()   // phase 9: the files of the active project (the shared out/ folder when there is none)
 #endif
 
 // 1 when the message is the save command (/save or /guardar, case-insensitive, spaces around allowed).
@@ -17,6 +18,9 @@ int outfiles_is_cmd(const char* text);
 // Writes the named blocks of reply into OUT_DIR. note gets a one-line summary for the screen.
 // Returns the number of files written (0 when none; the note says why).
 int outfiles_save(const char* reply, char* note, int note_max);
+
+// How many named files of reply /guardar or the agent would write, without writing anything.
+int outfiles_count(const char* reply);
 
 // Writes one file under OUT_DIR (folders are made). The path must pass outfiles_path_ok. 0 = ok, < 0 = refused or failed.
 int outfiles_write(const char* rel, const char* data, int n);

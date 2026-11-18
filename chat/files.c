@@ -40,7 +40,7 @@ static int list_dir(char names[][NAME_MAX_LEN], int n, int max, const char* sub,
         int ok = read(f, &c, 1) >= 0;   // (a folder opens too, but read() fails on it)
         close(f);
         if (ok) strcpy(names[n++], rel);
-        else if (sub[0] && depth < 4) n = list_dir(names, n, max, rel, depth + 1);
+        else if (sub[0] && depth < 6) n = list_dir(names, n, max, rel, depth + 1);
     }
     closedir(d);
     return n;

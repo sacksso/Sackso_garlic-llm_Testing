@@ -41,6 +41,7 @@
 #include "filepick.h"   // the file explorer (F5, right click, /archivos)
 #include "devcmd.h"   // phase 7: /proyecto /mapa /grep /aplicar /empaquetar /auto /limite and the agent
 #include "webcmd.h"    // /red /gh /url /web: network commands (off by default), and what they fetched
+#include "workspace.h"   // phase 9: projects (a folder of files + instructions + progress for each)
 #include "progress.h"   // phase 8: progress kept outside the model's memory (/progreso, /retomar, the checkpoint before a restart)
 #include "ask.h"       // /ok: bring what the model asked for in its last answer (@zip:path, /gh, /url)
 
@@ -378,7 +379,7 @@ static void view_update(void) {
     static int net_now;
     if (view.time - net_chk > 1.0 || view.time < net_chk) net_now = webcmd_net_on(), net_chk = view.time;
     view.dev_net = net_now;
-    view.dev_project = files_project();
+    view.dev_project = ws_name()[0] ? ws_name() : files_project();   // phase 9: the project's name when there is one
     view.api_busy = api_busy;
     if (!generating) view.pos = pos + (hist_n - hist_done);   // (the answer still to read again counts)
 }
@@ -677,7 +678,7 @@ static void hist_ahead(int tokens) {
 
 // The system prompt goes through the model ahead of time while nothing else runs (a new conversation then starts
 // with pos = its length): a few tokens per call, so the screen keeps moving. sys_pre counts the tokens done.
-static uint32_t sys_ids[1024];
+static uint32_t sys_ids[1536];
 static int sys_n, sys_pre;
 
 #define SYSTEM_PROMPT_TEXT tr(S_SYSTEM_PROMPT)
@@ -688,7 +689,9 @@ static int sys_n, sys_pre;
 // new conversation, so it can be edited over FTP without restarting the app. Missing or empty: the built-in one.
 static char sysp_file[4096];
 
-static const char* system_prompt_text(void) {
+static char sysp_ws[6144];   // phase 9: the prompt with the block of the active project at the end
+
+static const char* system_prompt_base(void) {
     int f = open("/data/garlic_system.txt", O_RDONLY);
     if (f >= 0) {
         int n = read(f, sysp_file, sizeof(sysp_file) - 1);
@@ -700,8 +703,18 @@ static const char* system_prompt_text(void) {
             return sysp_file;
         }
     }
-    if (devcmd_auto_on() || files_project()[0]) return devcmd_system_prompt();   // phase 7: the programming prompt
+    if (devcmd_auto_on() || files_project()[0] || ws_name()[0]) return devcmd_system_prompt();   // phase 7: the programming prompt
     return SYSTEM_PROMPT_TEXT;
+}
+
+static const char* system_prompt_text(void) {
+    const char* base = system_prompt_base();
+    char blk[1400];
+    if (ws_prompt_block(blk, sizeof(blk)) > 0) {   // the project's name, how to hand over files, its instructions
+        snprintf(sysp_ws, sizeof(sysp_ws), "%s\n\n%s", base, blk);
+        return sysp_ws;
+    }
+    return base;
 }
 
 static int system_ids(uint32_t* ids, int max) {
@@ -720,7 +733,7 @@ static void system_ahead(int tokens) {
         return;
     }
     if (sys_pre == 0) {
-        sys_n = system_ids(sys_ids, 1024);
+        sys_n = system_ids(sys_ids, 1536);
         engine_reset(&eng);
     }
     int k = sys_n - sys_pre < tokens ? sys_n - sys_pre : tokens;
@@ -2327,7 +2340,7 @@ int main(void) {
     size_t flex1 = 0;
     ((int32_t(*)(size_t*))sceKernelAvailableFlexibleMemorySize)(&flex1);
     say("voice %s; system RAM free: %u MiB", tts_ready ? "ready" : "not available", (unsigned)(flex1 >> 20));
-    view.temperature = devcmd_auto_on() || files_project()[0] ? 0.3f : 0.7f;   // phase 8: code must be copied exactly: cooler by default (L2/R2)
+    view.temperature = devcmd_auto_on() || files_project()[0] || ws_name()[0] ? 0.3f : 0.7f;   // phase 8: code must be copied exactly: cooler by default (L2/R2)
     think_config();
     api_set_model(MODEL_NAME);
     api_config();   // the OpenAI-compatible API (api.h), if it was left on; its jobs run in the loop below

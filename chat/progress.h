@@ -11,7 +11,8 @@
 #define PROGRESS_H
 
 #ifndef PROGRESS_FILE
-#define PROGRESS_FILE "/data/garlic_progress.txt"
+#include "workspace.h"
+#define PROGRESS_FILE ws_progress_file()   // phase 9: one ledger per project (/data/garlic_progress.txt when there is none)
 #endif
 
 // 1 for /progreso (also /checkpoint), 2 for /retomar (also /resume), else 0.

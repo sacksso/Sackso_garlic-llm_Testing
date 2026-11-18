@@ -2,10 +2,14 @@
 //   /proyecto [zip]       the repo zip that "@zip" means (no name: shows the current one)
 //   /mapa                 the map of the project (files, sizes, functions with line numbers) for the next message
 //   /grep words           the parts of the project that match the words, for the next message
-//   /aplicar              applies the edit blocks (BUSCAR/REEMPLAZAR) of the last answer, into /data/garlic_files/out
+//   /aplicar              applies the edit blocks (BUSCAR/REEMPLAZAR) of the last answer and saves its named files
+//                         ("Archivo: path" + a code block), into the project (or /data/garlic_files/out)
 //   /empaquetar [name]    packs the out folder into /data/garlic_files/<name>.zip (one file to take over FTP)
 //   /auto on|off [N]      the agent: after an answer the app applies the edits or brings what the answer asked for by
 //                         itself, up to N rounds (default 4), and tells the model what failed
+//   /proyectos            the projects (phase 9: a project = a folder of files the AI created + its instructions + its progress)
+//   /proyecto nuevo NAME [zip] | /proyecto NAME | /proyecto salir    make / open / leave a project (see workspace.h)
+//   /instrucciones [text] the project's instructions for the model (INSTRUCCIONES.md)
 //   /limite N             at most N tokens of context for one message (0 = as much as fits)
 // Settings are kept in /data/garlic_dev.txt.
 #ifndef DEVCMD_H
