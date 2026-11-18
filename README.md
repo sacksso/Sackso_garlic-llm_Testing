@@ -26,9 +26,10 @@ Speeds were measured on a base/Slim PS4. On a PS4 Pro, chat runs at up to 45 tok
 
 ## Requirements
 
-- A PS4, PS4 Slim or PS4 Pro running [GoldHEN](https://github.com/GoldHEN/GoldHEN). It works on firmware 9.00, 9.04, 11.00, 11.52, 12.02, 12.50 and 14.00.
+- A PS4, PS4 Slim or PS4 Pro running [GoldHEN](https://github.com/GoldHEN/GoldHEN). It works on firmware 9.00, 9.04, 11.00, 11.52, 12.02, 12.50, 13.52 and 14.00.
 - About 6 GB of free space, or 12 GB if you copy the package to the console's own disk before installing it.
 - To use your voice: any ordinary microphone the console recognises.
+- To type on a real keyboard: any USB keyboard. Press OPTIONS in the chat to open the console's keyboard.
 
 Other firmware versions are not tested yet. If you try one, please [open an issue](https://github.com/leonardo-alegria/garlic-llm/issues) with the result.
 
@@ -47,6 +48,7 @@ Other firmware versions are not tested yet. If you try one, please [open an issu
 | Button | Action |
 |---|---|
 | ✕ | Type a message |
+| OPTIONS | Type with the console's keyboard, which also takes a USB keyboard |
 | □ (hold) | Dictate a message; release to finish |
 | ○ | Stop the answer |
 | △ | New chat |
