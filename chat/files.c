@@ -537,6 +537,12 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
             continue;
         }
         int cut = 0;
+        if (!g_att_a && strchr(name, ':') && strncmp(name, "web/", 4) && n > FILES_WHOLE_CAP && room > FILES_WHOLE_CAP) {
+            // phase 8: a whole file of the project is only its first part (the prefill of ~65 tokens/s makes the rest cost
+            // minutes); the end of the answer tells how to ask for a function or a line range
+            n = cut_clean(body, FILES_WHOLE_CAP);
+            cut = 1;
+        } else
         if (n > room) n = cut_clean(body, room), cut = 1;
         else if (!g_att_a && (size > (long)sizeof(body) - 1 || zcut)) cut = 1;   // (a line range / function is whole: size is the file's)
         if (n > 0 && body[n - 1] == '\n') n--;

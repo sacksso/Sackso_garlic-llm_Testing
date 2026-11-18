@@ -37,6 +37,9 @@ void devcmd_user_turn(void);
 // line for the screen ("" when none). net_on says whether the network switch is on (the agent never turns it on).
 int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_max, char* note, int note_max);
 
+// A new context begins (restart, /retomar): what the agent remembers of the last round (a repeated request) is dropped.
+void devcmd_new_context(void);
+
 // The system prompt for programming work, used when /data/garlic_system.txt is missing.
 const char* devcmd_system_prompt(void);
 

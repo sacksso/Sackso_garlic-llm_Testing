@@ -12,6 +12,7 @@
 #include "patch.h"
 #include "repomap.h"
 #include "zipwrite.h"
+#include "progress.h"
 
 #define FBUF (200 * 1024)
 #define MAX_BLOCKS 16
@@ -22,6 +23,9 @@ static int g_loaded;
 static char g_pend[PEND_MAX];
 static int g_pend_n;
 static RepoSeenSet g_seen;
+static char g_prev_want[420];   // phase 8: what the model asked for in the last round (a repeat is not brought again)
+static char g_warn[700];        // phase 8: edits that changed the balance of () {} [] (the agent tells the model)
+static int g_warn_n;
 
 static void load(void) {
     if (g_loaded) return;
@@ -50,7 +54,8 @@ static void save(void) {
 
 int devcmd_auto_on(void) { load(); return g_auto; }
 int devcmd_token_limit(void) { load(); return g_limit; }
-void devcmd_user_turn(void) { g_round_now = 0; g_seen.n = 0; }
+void devcmd_user_turn(void) { g_round_now = 0; g_seen.n = 0; g_prev_want[0] = 0; }
+void devcmd_new_context(void) { g_prev_want[0] = 0; }
 int devcmd_pending_len(void) { return g_pend_n; }
 
 int devcmd_take_pending(char* dst, int max) {
@@ -139,6 +144,8 @@ static int apply_reply(const char* reply, char* report, int rmax, int* ok, int* 
     int rl = 0;
     *ok = *bad = 0;
     report[0] = 0;
+    g_warn[0] = 0;
+    g_warn_n = 0;
     for (int i = 0; i < nb; i++) {
         const PatchBlock* b = &blocks[i];
         char rel[160], hint[400] = "", what[760];
@@ -160,10 +167,23 @@ static int apply_reply(const char* reply, char* report, int rmax, int* ok, int* 
             snprintf(what, sizeof(what), "FALLO %s: path not allowed (letters, digits . _ - / only, at most 4 levels)", b->path);
             (*bad)++;
         } else {
+            int bal0[3] = {0, 0, 0}, bal1[3];
+            if (exists) patch_balance(rel, fbuf, len, bal0);
             int rc = patch_apply(fbuf, &len, FBUF + 32 * 1024 - 1, b, exists, &line, &how, hint, sizeof(hint));
             if (rc == 0 && outfiles_write(rel, fbuf, len) == 0) {
                 snprintf(what, sizeof(what), "OK %s (line %d, %s match)", rel, line, how);
                 (*ok)++;
+                if (patch_balance(rel, fbuf, len, bal1) && (bal1[0] != bal0[0] || bal1[1] != bal0[1] || bal1[2] != bal0[2])) {
+                    char w[200];   // an edit rarely changes how many brackets are open: a block was left open or closed twice
+                    snprintf(w, sizeof(w), " WARNING: now %+d in () %+d in {} %+d in [] (open minus closed, compared with before).",
+                             bal1[0] - bal0[0], bal1[1] - bal0[1], bal1[2] - bal0[2]);
+                    int wl = (int)strlen(what);
+                    snprintf(what + wl, sizeof(what) - wl, "%s", w);
+                    int gl = (int)strlen(g_warn);
+                    snprintf(g_warn + gl, sizeof(g_warn) - gl, "%s: %+d en (), %+d en {}, %+d en [].\n", rel, bal1[0] - bal0[0],
+                             bal1[1] - bal0[1], bal1[2] - bal0[2]);
+                    g_warn_n++;
+                }
             } else if (rc == 0) {
                 snprintf(what, sizeof(what), "FALLO %s: could not write", rel);
                 (*bad)++;
@@ -183,6 +203,7 @@ static int apply_reply(const char* reply, char* report, int rmax, int* ok, int* 
         if (w > rmax - rl - 1) w = rmax - rl - 1;
         rl += w;
     }
+    progress_edits(*ok, *bad, report);   // phase 8: the ledger that survives a restart of the context
     return nb;
 }
 
@@ -295,6 +316,15 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
         int ok, bad;
         apply_reply(reply, rep, sizeof(rep), &ok, &bad);
         g_round_now++;
+        if (!bad && g_warn_n) {   // applied, but the brackets no longer add up: the model looks at it once
+            snprintf(note, note_max, "Auto: %d edit(s) applied, but the brackets changed (%s). Telling the model.", ok, g_warn_n > 1 ? "several files" : "see CAMBIOS.txt");
+            snprintf(next_msg, next_max,
+                     "Los cambios se aplicaron, pero la comprobacion de llaves avisa (abiertos menos cerrados, frente a antes):\n%s"
+                     "Un cambio normal no cambia esos numeros. Revisa tu ultimo bloque: ¿falta o sobra un }, ) o ]? "
+                     "Si hay un error, reenvia SOLO el bloque corregido; si esta bien, di \"correcto\" y no pidas nada mas.",
+                     g_warn);
+            return 1;
+        }
         if (!bad) {
             snprintf(note, note_max, "Auto: %d edit(s) applied in /data/garlic_files/out (log: CAMBIOS.txt). /empaquetar makes one zip.", ok);
             return 0;
@@ -312,6 +342,15 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
             snprintf(note, note_max, "The answer asks for the network, but /red is off. Type /red on, then /ok.");
             return 0;
         }
+        if (!strcmp(want, g_prev_want)) {   // the same request twice in a row: the answer would be the same
+            g_round_now++;
+            snprintf(note, note_max, "Auto: the same request again (round %d of %d). Telling the model instead of sending it twice.", g_round_now, g_rounds);
+            snprintf(next_msg, next_max,
+                     "Eso mismo ya te lo mande en el mensaje anterior (esta arriba; si salio cortado, el final dice como pedir el resto). "
+                     "No lo pidas otra vez. Usa lo que tienes, o pide SOLO lo que falta con @zip:ruta:A-B (lineas) o @zip:ruta#funcion.");
+            return 1;
+        }
+        snprintf(g_prev_want, sizeof(g_prev_want), "%s", want);
         g_round_now++;
         snprintf(note, note_max, "Auto: bringing what the answer asked for (round %d of %d).", g_round_now, g_rounds);
         snprintf(next_msg, next_max, "/ok");
@@ -321,9 +360,28 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
 }
 
 const char* devcmd_system_prompt(void) {
-    return "Eres un asistente de programacion en una PS4. Respondes en el idioma del usuario, breve y concreto.\n"
-           "No puedes abrir archivos: la app te los da. Pide codigo con @zip:ruta, @zip:ruta:10-80, @zip:ruta#funcion o @zip?palabras. Un @zip solo es el mapa del repo. No adivines contenido que no has visto.\n"
-           "Para cambiar codigo usa bloques:\nArchivo: ruta/del/archivo.c\n<<<<<<< BUSCAR\ntexto exacto actual\n=======\ntexto nuevo\n>>>>>>> REEMPLAZAR\n"
-           "El texto de BUSCAR debe existir tal cual y ser unico. Solo cambia lo necesario. Archivo nuevo: BUSCAR vacio.\n"
-           "Si necesitas ver mas, pidelo en una linea @... y nada mas.\n";
+    return
+           "Eres un asistente de programación en una PS4, sin internet. Respondes en el idioma del usuario, breve y concreto. No puedes abrir archivos: la app te los da.\n"
+           "\n"
+           "CÓMO TRABAJAS\n"
+           "1. Entiende la petición. Si no tienes el código, pídelo antes de opinar; no adivines lo que no has visto.\n"
+           "2. Pide lo mínimo, máx. 3 líneas, solo la petición y nada más: por ejemplo @zip:chat/main.c#send_text, @zip:chat/files.c:100-180 o @zip?dns+tls. Un @zip solo es el mapa del repo. No pidas archivos enteros grandes ni repitas lo que ya te llegó; si llegó cortado, pide el rango que falta.\n"
+           "3. Usa solo rutas que aparezcan en el mapa; los ejemplos de arriba no son archivos de este proyecto.\n"
+           "4. Cambia solo lo necesario, un bloque por cambio:\n"
+           "Archivo: chat/ask.c\n"
+           "<<<<<<< BUSCAR\n"
+           "    int a = 1;\n"
+           "=======\n"
+           "    int a = 2;\n"
+           ">>>>>>> REEMPLAZAR\n"
+           "BUSCAR se copia tal cual del código que viste (misma sangría) y debe ser único. Archivo nuevo: BUSCAR vacío. Varios cambios, varios bloques.\n"
+           "5. Después de los bloques: una línea con lo que cambiaste y otra con cómo comprobarlo. Si el cambio exige tocar otro archivo (cabecera, llamadas), pídelo o cámbialo también.\n"
+           "\n"
+           "REGLAS\n"
+           "- Ante un error: la causa primero, luego el cambio mínimo. No reescribas lo que funciona.\n"
+           "- Respeta el estilo del proyecto. No inventes funciones, APIs ni versiones; si dudas, dilo y di qué comprobarías.\n"
+           "- Si la app dice que un bloque falló, reenvía solo ese, copiando el texto que ella te muestra. Si avisa de que las llaves no cuadran, revisa tu último bloque.\n"
+           "- Si el mensaje empieza con [REINICIO], el contexto se reinició: sigue desde TUS NOTAS sin repetir lo hecho.\n"
+           "- Código nuevo sin repo: un solo bloque ``` completo y ejecutable, con el lenguaje indicado.\n"
+           "- Si algo llegó cortado, avisa.\n";
 }

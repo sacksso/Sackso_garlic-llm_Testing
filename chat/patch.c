@@ -339,3 +339,40 @@ int patch_apply(char* buf, int* len, int cap, const PatchBlock* b, int file_exis
     hint_for(buf, nfl, b->search, b->slen, hint, hint_max);
     return -1;
 }
+
+// ---- phase 8: balance of brackets (see patch.h) ----------------------------------------------------------------------
+static int ext_is(const char* path, const char* ext) {
+    int pl = (int)strlen(path), el = (int)strlen(ext);
+    return pl > el && !strcmp(path + pl - el, ext) && path[pl - el - 1] == '.';
+}
+
+int patch_balance(const char* path, const char* t, int len, int out[3]) {
+    static const char* const exts[] = {"c", "h", "cc", "cpp", "hpp", "cs", "java", "js", "ts", "css", "go", "rs", "kt", "swift", "json", NULL};
+    int known = 0;
+    for (int i = 0; exts[i]; i++)
+        if (ext_is(path, exts[i])) known = 1;
+    out[0] = out[1] = out[2] = 0;
+    if (!known) return 0;
+    for (int i = 0; i < len; i++) {
+        char c = t[i];
+        if (c == '/' && i + 1 < len && t[i + 1] == '/') {
+            while (i < len && t[i] != '\n') i++;
+        } else if (c == '/' && i + 1 < len && t[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(t[i] == '*' && t[i + 1] == '/')) i++;
+            i++;
+        } else if (c == '"') {
+            for (i++; i < len && t[i] != '"' && t[i] != '\n'; i++)
+                if (t[i] == '\\') i++;
+        } else if (c == '\'') {   // a character literal only when it looks like one ('x' or '\x'): Rust lifetimes are not
+            if (i + 2 < len && t[i + 1] != '\\' && t[i + 2] == '\'') i += 2;
+            else if (i + 3 < len && t[i + 1] == '\\' && t[i + 3] == '\'') i += 3;
+        } else if (c == '(') out[0]++;
+        else if (c == ')') out[0]--;
+        else if (c == '{') out[1]++;
+        else if (c == '}') out[1]--;
+        else if (c == '[') out[2]++;
+        else if (c == ']') out[2]--;
+    }
+    return 1;
+}

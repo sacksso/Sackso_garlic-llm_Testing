@@ -41,6 +41,7 @@
 #include "filepick.h"   // the file explorer (F5, right click, /archivos)
 #include "devcmd.h"   // phase 7: /proyecto /mapa /grep /aplicar /empaquetar /auto /limite and the agent
 #include "webcmd.h"    // /red /gh /url /web: network commands (off by default), and what they fetched
+#include "progress.h"   // phase 8: progress kept outside the model's memory (/progreso, /retomar, the checkpoint before a restart)
 #include "ask.h"       // /ok: bring what the model asked for in its last answer (@zip:path, /gh, /url)
 
 #define ASSETS "/app0/assets"
@@ -739,8 +740,15 @@ static int agent_msg;   // 1 while the text is one the agent sent itself (it doe
 static int pick_due;    // 1 when the file explorer must open (the /archivos command)
 static unsigned g_mouse_btn;   // mouse buttons held at the last poll (bit 0 left, 1 right)
 static int agent_due;   // 1 after an answer that ended by itself: the main loop lets the agent look at it
+// Phase 8: before the context restarts the model writes notes (a "checkpoint" turn); they are saved and the work goes on
+// in a fresh context that starts from them.
+static int cp_phase;          // 1 while the model writes its notes
+static int cp_resume;         // 1: afterwards, start a fresh context and go on by itself; 0: only save
+static int cp_ended;          // 1 when the notes ended by themselves (the user did not stop them)
+static char cp_next[1500];    // what the agent was about to send when the checkpoint began
 
 static const char* turn_files;   // text of the @files of this message (files.c), sent to the model but not shown
+static const char* turn_resume;  // phase 8: the saved progress, put before them in the first message of a restarted context
 
 static void start_turn(const char* user_text) {
     static uint32_t ids[15000];   // (with what is left of a thought turn's answer, hist_ids; phase 7: room for a repo's code)
@@ -767,6 +775,10 @@ static void start_turn(const char* user_text) {
     }
     ids[n++] = IM_START;
     n = encode_into(ids, n, max, "user\n");
+    if (turn_resume && turn_resume[0]) {   // phase 8: where the work was, from the saved progress
+        n = encode_into(ids, n, max - 8, turn_resume);
+        n = encode_into(ids, n, max - 8, "\n\n");
+    }
     if (turn_files && turn_files[0]) {   // the files go first, the question after them
         n = encode_into(ids, n, max - 8, turn_files);
         n = encode_into(ids, n, max - 8, "\n");
@@ -796,6 +808,7 @@ static void start_turn(const char* user_text) {
             static const char big[] = "That message is bigger than the whole context: the attached files were left out. Ask for less (@zip:file:A-B) or raise nothing: the limit is the model's memory.";
             msg_append(note, big, sizeof(big) - 1);
             turn_files = NULL;
+            turn_resume = NULL;
             restarts = 0;
             pos = 0;
             need_close = 0;
@@ -805,8 +818,16 @@ static void start_turn(const char* user_text) {
         pos = 0;
         need_close = 0;
         msg_append(note, tr(S_CONTEXT_FULL), strlen(tr(S_CONTEXT_FULL)));
+        static char rbuf[4200];   // phase 8: the saved progress opens the new context (what the model had in mind)
+        if (progress_has() && progress_resume_text(rbuf, sizeof(rbuf), NULL, 0) > 0) {
+            turn_resume = rbuf;
+            static const char kept[] = " The saved progress goes along (/data/garlic_progress.txt).";
+            msg_append(note, kept, sizeof(kept) - 1);
+            devcmd_new_context();
+        }
         restarts++;
         start_turn(user_text);
+        turn_resume = NULL;
         restarts = 0;
         return;
     }
@@ -1008,7 +1029,8 @@ static void finish_turn(int ended_by_model) {
     }
 #endif
     if (think_turn) think_finish();
-    if (ended_by_model) agent_due = 1;
+    if (cp_phase) cp_ended = ended_by_model, agent_due = 1;   // the notes turn: cp_finish saves what there is
+    else if (ended_by_model) agent_due = 1;
 }
 
 // A token of the reply on screen (only complete UTF-8 characters) and, after a reasoning, in the history.
@@ -1286,6 +1308,64 @@ static int voice_to_text(uint32_t button, DrawUnder under, char* text, int max) 
     return 1;
 }
 
+// ---- phase 8: progress kept outside the model's memory ----------------------------------------------------------
+
+static void send_text(const char* text);
+
+static void note_msg(const char* s) {
+    Msg* m = msg_new(MSG_NOTE);
+    msg_append(m, s, strlen(s));
+    view.scroll = 0;
+}
+
+// The agent is about to send something and the context is nearly full: a checkpoint comes first (a quarter of the
+// context left, at least 2000 tokens). Below that, even the next files would be squeezed.
+static int cp_low(void) {
+    int soft = (int)eng.ctx_limit / 4;
+    if (soft < 2000) soft = 2000;
+    return pos > 0 && (int)eng.ctx_limit - pos < soft;
+}
+
+// Asks the model for its notes. next = what the agent will send afterwards ("" for none). resume = 1 to go on in a
+// fresh context by itself. Returns 0 when there is not even room for the notes.
+static int cp_start(const char* next, int resume) {
+    int room = 1024 + (think_on ? think_cap + 64 : 0);
+    if ((int)eng.ctx_limit - pos < room + 400) return 0;
+    snprintf(cp_next, sizeof(cp_next), "%s", next ? next : "");
+    cp_phase = 1;
+    cp_resume = resume;
+    cp_ended = 0;
+    note_msg(resume ? "Context almost full: the model writes its notes (saved in /data/garlic_progress.txt) and the work goes on in a fresh context."
+                    : "The model writes its progress notes now (/data/garlic_progress.txt).");
+    say("progress: checkpoint turn at %d of %d tokens", pos, (int)eng.ctx_limit);
+    start_turn(progress_checkpoint_prompt());
+    return 1;
+}
+
+// The notes are written (they are the newest answer): save them and, if asked, start over from them.
+static void cp_finish(void) {
+    cp_phase = 0;
+    if (n_msgs < 1 || msgs[n_msgs - 1].who != MSG_AI) return;
+    progress_notes(msgs[n_msgs - 1].text);
+    int rc = progress_save();
+    say("progress: notes saved (%d)", rc);
+    if (!cp_resume || !cp_ended) {   // (stopped by the user: they decide)
+        note_msg(rc == 0 ? "Progress saved in /data/garlic_progress.txt. /retomar starts a fresh context from it."
+                         : "Could not write /data/garlic_progress.txt.");
+        return;
+    }
+    static char res[5200];
+    int plain_ok = !strcmp(cp_next, "/ok");
+    progress_resume_text(res, sizeof(res), plain_ok || !cp_next[0] ? NULL : cp_next, plain_ok);
+    pos = 0;
+    need_close = 0;
+    devcmd_new_context();
+    note_msg("Progress saved. Fresh context: the work goes on from the notes.");
+    agent_msg = 1;
+    send_text(res);
+    agent_msg = 0;
+}
+
 // A message the user wrote: @name words bring the files of /data/garlic_files along (files.h); a lone @ lists them.
 static void send_text(const char* text) {
     static char ctx[40000];   // (about 15K tokens at most: ids[] in start_turn holds 15000)
@@ -1293,6 +1373,29 @@ static void send_text(const char* text) {
     static char okmsg[700];   // phase 6: what /ok sends (the model's requests, as @files)
     int ask_plain = ask_is_plain_yes(text);
     if (!agent_msg && !devcmd_is_cmd(text) && !webcmd_is_cmd(text)) devcmd_user_turn();
+    if (!agent_msg && !ask_plain && !ask_is_cmd(text)) progress_goal(text);   // phase 8: the task, kept outside the model
+    int pc = progress_is_cmd(text);
+    if (pc == 1) {   // /progreso: the model writes its notes now, they are saved
+        if (pos == 0 || n_msgs == 0) note_msg("Nothing to save yet: there is no conversation.");
+        else if (!cp_start("", 0)) note_msg("No room left for the notes. /retomar still starts from the last saved progress.");
+        return;
+    }
+    if (pc == 2) {   // /retomar: a fresh context that starts from the saved progress
+        if (!progress_has() && !progress_load()) {
+            note_msg("No saved progress yet (/data/garlic_progress.txt). /progreso saves it.");
+            return;
+        }
+        static char res[5200];
+        progress_resume_text(res, sizeof(res), NULL, 1);
+        pos = 0;
+        need_close = 0;
+        devcmd_new_context();
+        note_msg("Fresh context from the saved progress.");
+        agent_msg = 1;
+        send_text(res);
+        agent_msg = 0;
+        return;
+    }
     if (!strcmp(text, "/archivos") || !strcmp(text, "/files") || !strcmp(text, "/explorar")) {   // the file explorer
         pick_due = 1;
         return;
@@ -1985,6 +2088,7 @@ static void voice_mode(void) {
             tts_stop();
             if (generating) finish_turn(0);
             msgs_clear();
+            progress_clear();
             pos = 0, need_close = 0, view.scroll = 0;
             tts.msg = -1;
         }
@@ -2223,7 +2327,7 @@ int main(void) {
     size_t flex1 = 0;
     ((int32_t(*)(size_t*))sceKernelAvailableFlexibleMemorySize)(&flex1);
     say("voice %s; system RAM free: %u MiB", tts_ready ? "ready" : "not available", (unsigned)(flex1 >> 20));
-    view.temperature = 0.7f;
+    view.temperature = devcmd_auto_on() || files_project()[0] ? 0.3f : 0.7f;   // phase 8: code must be copied exactly: cooler by default (L2/R2)
     think_config();
     api_set_model(MODEL_NAME);
     api_config();   // the OpenAI-compatible API (api.h), if it was left on; its jobs run in the loop below
@@ -2285,6 +2389,7 @@ int main(void) {
                     think_toggle();
                 } else if (ctrl && ik.code == 17) {   // Ctrl+N = new chat (the pad's Triangle); 17 = the N key
                     msgs_clear();
+                    progress_clear();
                     pos = 0;
                     need_close = 0;
                     view.scroll = 0;
@@ -2323,6 +2428,7 @@ int main(void) {
             prev = read_buttons();
         } else if (pressed & ORBIS_PAD_BUTTON_TRIANGLE) {
             msgs_clear();
+            progress_clear();
             pos = 0;
             need_close = 0;
             view.scroll = 0;
@@ -2338,13 +2444,22 @@ int main(void) {
         if (!generating && agent_due) {   // phase 7: the agent applies edits or brings what the answer asked for
             agent_due = 0;
             static char nx[1500], no[700];
-            if (n_msgs > 0 && msgs[n_msgs - 1].who == MSG_AI) {
+            if (cp_phase) {   // phase 8: the model's notes are ready
+                cp_finish();
+                prev = read_buttons();
+            } else if (n_msgs > 0 && msgs[n_msgs - 1].who == MSG_AI) {
                 int go = devcmd_agent_step(msgs[n_msgs - 1].text, webcmd_net_on(), nx, sizeof(nx), no, sizeof(no));
                 if (no[0]) {
                     say("agent: %.200s", no);
                     Msg* nm = msg_new(MSG_NOTE);
                     msg_append(nm, no, strlen(no));
                     view.scroll = 0;
+                }
+                if (go && cp_low()) {   // phase 8: not enough room for what comes next: notes first, then a fresh context
+                    char want[420], webs[420];
+                    ask_collect(msgs[n_msgs - 1].text, want, sizeof(want), webs, sizeof(webs));
+                    progress_asked(want);
+                    if (cp_start(nx, 1)) go = 0;
                 }
                 if (go) {
                     agent_msg = 1;

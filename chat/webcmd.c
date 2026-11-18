@@ -658,6 +658,7 @@ int webcmd_run(const char* t, char* note, int nm) {
                  "FILES\n@  list   |   @name   |   @repo.zip:path   |   @doc.docx\n/guardar  saves the files of the last answer\n"
                  "INTERNET (/red on first)\n/web words   /abrir N   /wiki words\n/url https://...   /gh owner/repo [path | zip]\n"
                  "PROJECT\n/proyecto zip   /mapa   /grep words   /aplicar   /empaquetar   /auto on|off [N]   /limite N\n"
+                 "PROGRESS\n/progreso  the model writes its notes, saved   |   /retomar  fresh context from them\n"
                  "OTHER\n/estado  state   |   /limpiar  drop fetched text   |   /red on|off\n"
                  "Short forms: /b /o /w /u /g");
         break;

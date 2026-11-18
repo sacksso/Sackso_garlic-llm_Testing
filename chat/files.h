@@ -25,6 +25,11 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
 //   @repo.zip:path            the whole file (a cut file says so, and how to ask for the rest)
 //   @repo.zip:path:120-200    lines 120 to 200            @repo.zip:path#send_text    one function / class / heading
 //   @repo.zip?dns+tls         search the repo: the best files, only the parts around the matches
+// Phase 8: how much of a whole project file one request brings (a range or a #function is not limited by it).
+#ifndef FILES_WHOLE_CAP
+#define FILES_WHOLE_CAP 7000
+#endif
+
 #define FILES_ATT_MAX 12
 typedef struct {
     char path[100];   // inside the zip, without the repo-main/ folder

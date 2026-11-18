@@ -39,4 +39,11 @@ int patch_has_blocks(const char* text);
 //        -2 = it matches in several places (add more lines around it), -3 = no room, -4 = empty search on existing text.
 int patch_apply(char* buf, int* len, int cap, const PatchBlock* b, int file_exists, int* line, const char** how, char* hint, int hint_max);
 
+
+// Phase 8: a cheap check after an edit. For C-like files (c h cpp cs java js ts css go rs kt swift json) counts the open
+// minus the closed (), {} and [] outside comments and strings: out[0] = (), out[1] = {}, out[2] = []. Returns 0 when
+// the file type is not checked. An edit normally leaves these numbers as they were: when they change, a block was
+// probably left open or closed twice.
+int patch_balance(const char* path, const char* text, int len, int out[3]);
+
 #endif
