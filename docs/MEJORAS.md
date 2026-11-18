@@ -64,3 +64,7 @@ Es la más difícil: hace falta un codificador de visión (kernels y pesos nuevo
 
 ## Licencia
 El proyecto es GPLv3: tu fork debe seguir siendo GPLv3 y mantener los créditos (`CREDITS.md`).
+
+## Fase 9: proyectos (crear y guardar archivos por proyecto)
+`chat/workspace.c/h`. Un proyecto es `/data/garlic_files/out/NOMBRE/` (sus archivos) + `/data/garlic_projects/NOMBRE/` (INSTRUCCIONES.md, progress.txt, proyecto.txt). Comandos: `/proyecto nuevo|NOMBRE|salir`, `/proyectos`, `/instrucciones`, `/mapa`, `/aplicar`, `/empaquetar` (ver `docs/COMANDOS.md`). `OUT_DIR` y `PROGRESS_FILE` ahora se resuelven en tiempo de ejecución (`ws_out_dir()`, `ws_progress_file()`), así que outfiles, devcmd, el explorador y el libro de progreso siguen el proyecto activo sin más cambios. El agente (`/auto`) y `/aplicar` guardan también los archivos enteros (`Archivo: ruta` + bloque), no solo los BUSCAR/REEMPLAZAR; `outfiles` acepta `Archivo: ruta` sin acentos graves. El prompt integrado dice que la app guarda los archivos y que no debe decir "no puedo crear archivos"; `ask.c` ignora las peticiones de ejemplo (`@zip:ruta:lineas`, `@zip?palabras`). `tests/workspace_test.c` y `tests/dev9_test.c`.
+

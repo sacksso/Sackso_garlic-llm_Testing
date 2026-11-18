@@ -5,7 +5,7 @@ Se escriben como un mensaje normal en el chat (teclado de la app, USB o del sist
 ## Archivos
 | Comando | Qué hace |
 |---|---|
-| `/guardar` o `/save` | Guarda en `/data/garlic_files/out/` los bloques de código con nombre de la última respuesta. |
+| `/guardar` o `/save` | Guarda en la carpeta del proyecto (o en `/data/garlic_files/out/`) los bloques de código con nombre de la última respuesta. El nombre puede ir como `Archivo: ruta`, con la ruta entre acentos graves, en la línea del bloque (```yaml ruta) o como `# file: ruta` dentro. |
 
 ## Internet (primero `/red on`; apagado por defecto)
 | Comando | Qué hace |
@@ -46,6 +46,26 @@ Los nombres con espacios o símbolos no se pueden marcar (la nota lo dice): ren�
 Pedir código: `@zip:ruta` (archivo), `@zip:ruta:120-200` (líneas), `@zip:ruta#funcion` (una función), `@zip?dns+tls` (búsqueda).
 
 Teclado/ratón: cualquier tecla o clic izquierdo = escribir; clic derecho o Esc = parar; F1 ayuda, F2 agente on/off, F3 red on/off, F4 empaquetar, F5 explorador, Ctrl+T pensar, Ctrl+N chat nuevo, rueda/PgUp/PgDn desplazan. La cabecera muestra AUTO, RED y el proyecto.
+
+## Proyectos (fase 9): crear archivos y guardarlos por proyecto
+Un proyecto es una carpeta con lo que la IA crea, sus instrucciones y su propio progreso, como los proyectos de un asistente de chat.
+| Comando | Qué hace |
+|---|---|
+| `/proyecto nuevo NOMBRE [repo.zip]` | Crea el proyecto y lo activa (opcional: el zip del repo en el que se basa, que es lo que significa `@zip`). NOMBRE: letras, números `. _ -`, hasta 40. |
+| `/proyecto NOMBRE` | Abre un proyecto. Su lista de archivos e instrucciones viajan con tu siguiente mensaje. |
+| `/proyecto nombre.zip` | Con un proyecto abierto: ese zip pasa a ser su repo base. Sin proyecto: crea uno con el nombre del zip. |
+| `/proyecto salir` | Sin proyecto: los archivos vuelven a la carpeta común `out/`. |
+| `/proyecto` · `/proyectos` | Muestra el actual · lista todos (`*` = activo) con sus archivos. |
+| `/instrucciones texto` | Instrucciones del proyecto para el modelo (idioma, estilo, de qué va). Sin texto: las muestra; `borrar`: las quita. También se editan por FTP en `/data/garlic_projects/NOMBRE/INSTRUCCIONES.md`. |
+| `/mapa` | Con proyecto: sus instrucciones y la lista de sus archivos (con la ruta `@out/NOMBRE/...` que los pide), tras el mapa del zip si lo hay. |
+| `/aplicar` | Aplica los bloques `BUSCAR / REEMPLAZAR` **y guarda los archivos nombrados** (`Archivo: ruta` y debajo un bloque ```) de la última respuesta. |
+| `/auto on` | Hace lo mismo solo tras cada respuesta (también guarda los archivos nuevos). |
+| `/empaquetar` | Zip del proyecto: `/data/garlic_files/NOMBRE.zip`. |
+
+Dónde queda todo: archivos en `/data/garlic_files/out/NOMBRE/` (se ven en el explorador F5 y se piden con `@out/NOMBRE/ruta`); instrucciones, `progress.txt` y `proyecto.txt` en `/data/garlic_projects/NOMBRE/`; el proyecto activo en `/data/garlic_proyecto.txt`. `CAMBIOS.txt` (en la carpeta del proyecto) registra lo aplicado y lo guardado.
+Cada proyecto tiene su propio libro de progreso (`/progreso`, `/retomar`): al cambiar de proyecto se guarda el del actual y se lee el del nuevo.
+El bloque del proyecto (nombre, cómo entregar archivos, instrucciones) se añade al final del prompt de sistema al empezar un chat nuevo (Triángulo); al abrir o cambiar de proyecto en mitad de un chat, la información viaja en el siguiente mensaje.
+Sin proyecto activo todo funciona como antes (carpeta común `out/` y `/data/garlic_progress.txt`).
 
 ## Otros
 | Comando | Qué hace |
