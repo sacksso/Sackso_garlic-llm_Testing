@@ -22,6 +22,31 @@ Se escriben como un mensaje normal en el chat (teclado de la app, USB o del sist
 |---|---|
 | `/ok` (o `ok`, `si`, `dale` justo después de una respuesta que pide cosas) | Si la última respuesta de la IA nombra archivos (`@repo.zip:ruta`) o comandos de red (`/gh`, `/url`, `/web`), la app los trae y se los manda a la IA en un solo mensaje. Sin `/ok` no se lee nada. |
 
+## Explorador de archivos
+Se abre con **F5**, **clic derecho** (sin respuesta en curso) o el comando `/archivos`. Muestra `/data/garlic_files/` (y `out/`, `web/`); entrando en un `.zip` se ven sus carpetas y archivos. Marca uno o varios (hasta 8) y pulsa **Adjuntar**: la app abre el teclado con `@archivo1 @archivo2` ya escrito para que añadas tu pregunta. Marcar un zip entero adjunta su mapa.
+| Con | Hace |
+|---|---|
+| Ratón | Mover y clic: abre carpetas/zips, marca archivos (casilla), botones Subir / Cancelar / Adjuntar; rueda = desplazar; clic derecho = cancelar. |
+| Teclado USB | Flechas, Re Pág/Av Pág, Inicio/Fin; Enter abre o marca; Espacio marca; Retroceso o ← sube; F5 termina; Esc cancela. |
+| Mando | Cruceta mueve, X abre/marca, Cuadrado marca, Triángulo sube, R2 termina, Círculo cancela. |
+Los nombres con espacios o símbolos no se pueden marcar (la nota lo dice): renómbralos.
+
+## Proyecto y agente (fase 7)
+| Comando | Qué hace |
+|---|---|
+| `/proyecto [zip]` | Elige el zip del repo con el que trabaja la IA (sin nombre: muestra el actual). Se guarda en `/data/garlic_dev.txt`. |
+| `/mapa` | Prepara el mapa del repo (archivos, tamaño, líneas y funciones con su línea); viaja con tu siguiente mensaje. `@zip` solo también lo trae. |
+| `/grep palabras` | Busca en el repo y prepara solo los trozos que coinciden; viaja con tu siguiente mensaje. |
+| `/aplicar` | Aplica los bloques `BUSCAR / REEMPLAZAR` de la última respuesta. Los archivos quedan en `/data/garlic_files/out/` y el registro en `CAMBIOS.txt`. Nunca toca el zip original. |
+| `/empaquetar [nombre]` | Junta `out/` en `/data/garlic_files/nombre.zip` (un solo archivo por FTP). |
+| `/auto on\|off [N]` | Agente: tras cada respuesta aplica solo los cambios, o trae lo que la respuesta pidió (`@...`), hasta N rondas (4 por defecto). Si un cambio falla, se lo dice al modelo. La red solo se usa si `/red on`. |
+| `/limite N` | Máximo de tokens de contexto por mensaje (`0` = lo que quepa). |
+| `/gh usuario/repo zip` | (con `/red on`) Baja el repo entero como zip (hasta 8 MB) y lo deja como proyecto. |
+
+Pedir código: `@zip:ruta` (archivo), `@zip:ruta:120-200` (líneas), `@zip:ruta#funcion` (una función), `@zip?dns+tls` (búsqueda).
+
+Teclado/ratón: cualquier tecla o clic izquierdo = escribir; clic derecho o Esc = parar; F1 ayuda, F2 agente on/off, F3 red on/off, F4 empaquetar, F5 explorador, Ctrl+T pensar, Ctrl+N chat nuevo, rueda/PgUp/PgDn desplazan. La cabecera muestra AUTO, RED y el proyecto.
+
 ## Otros
 | Comando | Qué hace |
 |---|---|
@@ -51,7 +76,7 @@ Lo que bajan `/gh`, `/url` y `/web` espera y viaja al modelo **con tu siguiente 
 | `@repo.zip:ruta/archivo` | Un archivo del zip. Sirve la ruta completa, sin la carpeta `repo-main/`, o solo el nombre si es único. |
 | `@doc.docx` `.pptx` `.xlsx` `.odt` `.ods` `.odp` | El texto del documento (xlsx: celdas separadas por tabulador). |
 
-Límites: 14 000 bytes por mensaje (unos 4-5K tokens) y 8 archivos. Si no cabe, se corta y la nota lo dice. Sin soporte: zip64, zips cifrados, PDF.
+Límites: hasta ~40 000 bytes por mensaje, según lo que quepa en el contexto (ver `/limite`), y 8 archivos. Si no cabe, se corta y la nota lo dice. Sin soporte: zip64, zips cifrados, PDF.
 
 ## Qué buscar en `ps4ai_log.txt`
 Cada orden deja una línea: `save: ...`, `web: ... (N s)`, `files: ... (N s)` y `web text attached: N bytes`, seguidas de las líneas `prompt of N tokens in X s` de siempre.
