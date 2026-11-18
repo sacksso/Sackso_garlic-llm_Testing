@@ -18,4 +18,10 @@ int outfiles_is_cmd(const char* text);
 // Returns the number of files written (0 when none; the note says why).
 int outfiles_save(const char* reply, char* note, int note_max);
 
+// Writes one file under OUT_DIR (folders are made). The path must pass outfiles_path_ok. 0 = ok, < 0 = refused or failed.
+int outfiles_write(const char* rel, const char* data, int n);
+
+// 1 when rel is a safe relative path (no "..", no absolute path, limited depth and characters).
+int outfiles_path_ok(const char* rel);
+
 #endif

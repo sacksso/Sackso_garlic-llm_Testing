@@ -38,6 +38,8 @@
 #include "input.h"   // USB keyboard and mouse (from the psbrowser)
 #include "files.h"   // @name: text files from /data/garlic_files
 #include "outfiles.h"   // /save: the named code blocks of the last answer go to /data/garlic_files/out
+#include "filepick.h"   // the file explorer (F5, right click, /archivos)
+#include "devcmd.h"   // phase 7: /proyecto /mapa /grep /aplicar /empaquetar /auto /limite and the agent
 #include "webcmd.h"    // /red /gh /url /web: network commands (off by default), and what they fetched
 #include "ask.h"       // /ok: bring what the model asked for in its last answer (@zip:path, /gh, /url)
 
@@ -370,6 +372,12 @@ static void view_update(void) {
     view.think_text = think_text;
     view.think_len = think_len;
     view.api = api_chip[0] ? api_chip : NULL;
+    view.dev_auto = devcmd_auto_on();
+    static double net_chk;   // (a file read, so not at every frame)
+    static int net_now;
+    if (view.time - net_chk > 1.0 || view.time < net_chk) net_now = webcmd_net_on(), net_chk = view.time;
+    view.dev_net = net_now;
+    view.dev_project = files_project();
     view.api_busy = api_busy;
     if (!generating) view.pos = pos + (hist_n - hist_done);   // (the answer still to read again counts)
 }
@@ -691,6 +699,7 @@ static const char* system_prompt_text(void) {
             return sysp_file;
         }
     }
+    if (devcmd_auto_on() || files_project()[0]) return devcmd_system_prompt();   // phase 7: the programming prompt
     return SYSTEM_PROMPT_TEXT;
 }
 
@@ -726,11 +735,16 @@ static void system_ahead(int tokens) {
     }
 }
 
+static int agent_msg;   // 1 while the text is one the agent sent itself (it does not restart its round counter)
+static int pick_due;    // 1 when the file explorer must open (the /archivos command)
+static unsigned g_mouse_btn;   // mouse buttons held at the last poll (bit 0 left, 1 right)
+static int agent_due;   // 1 after an answer that ended by itself: the main loop lets the agent look at it
+
 static const char* turn_files;   // text of the @files of this message (files.c), sent to the model but not shown
 
 static void start_turn(const char* user_text) {
-    static uint32_t ids[8192];   // (with what is left of a thought turn's answer, hist_ids)
-    int n = 0, max = 8192, think = think_on && !in_voice_mode && eng.qwen35;
+    static uint32_t ids[15000];   // (with what is left of a thought turn's answer, hist_ids; phase 7: room for a repo's code)
+    int n = 0, max = 15000, think = think_on && !in_voice_mode && eng.qwen35;
     think_t_ask = now();
     sys_pre = 0;   // (a system prompt half read ahead is read again below)
     if (pos == 0) {
@@ -776,11 +790,24 @@ static void start_turn(const char* user_text) {
 
     int room = 1024 + (think ? think_cap + 64 : 0);
     if (pos + n + room > (int)eng.ctx_limit) {   // a nearly full context starts over (1024 free for the reply)
+        static int restarts;   // phase 7: a message that does not fit even in an empty context must not loop
+        Msg* note = msg_new(MSG_NOTE);
+        if (pos == 0 || restarts >= 1) {
+            static const char big[] = "That message is bigger than the whole context: the attached files were left out. Ask for less (@zip:file:A-B) or raise nothing: the limit is the model's memory.";
+            msg_append(note, big, sizeof(big) - 1);
+            turn_files = NULL;
+            restarts = 0;
+            pos = 0;
+            need_close = 0;
+            start_turn(user_text);
+            return;
+        }
         pos = 0;
         need_close = 0;
-        Msg* note = msg_new(MSG_NOTE);
         msg_append(note, tr(S_CONTEXT_FULL), strlen(tr(S_CONTEXT_FULL)));
+        restarts++;
         start_turn(user_text);
+        restarts = 0;
         return;
     }
     if (pos == 0) chatlog_begin();   // a new conversation: a new file in /data/chats (chatlog.h)
@@ -981,6 +1008,7 @@ static void finish_turn(int ended_by_model) {
     }
 #endif
     if (think_turn) think_finish();
+    if (ended_by_model) agent_due = 1;
 }
 
 // A token of the reply on screen (only complete UTF-8 characters) and, after a reasoning, in the history.
@@ -1260,10 +1288,26 @@ static int voice_to_text(uint32_t button, DrawUnder under, char* text, int max) 
 
 // A message the user wrote: @name words bring the files of /data/garlic_files along (files.h); a lone @ lists them.
 static void send_text(const char* text) {
-    static char ctx[14000];   // (about 4-5K tokens at most: ids[] in start_turn holds 8192)
+    static char ctx[40000];   // (about 15K tokens at most: ids[] in start_turn holds 15000)
     char note[1400];   // (the help text and a list of search results are longer than a line)
     static char okmsg[700];   // phase 6: what /ok sends (the model's requests, as @files)
     int ask_plain = ask_is_plain_yes(text);
+    if (!agent_msg && !devcmd_is_cmd(text) && !webcmd_is_cmd(text)) devcmd_user_turn();
+    if (!strcmp(text, "/archivos") || !strcmp(text, "/files") || !strcmp(text, "/explorar")) {   // the file explorer
+        pick_due = 1;
+        return;
+    }
+    if (devcmd_is_cmd(text)) {   // phase 7 commands: nothing goes to the model, results wait for the next message
+        int last = -1;
+        for (int i = n_msgs - 1; i >= 0 && last < 0; i--)
+            if (msgs[i].who == MSG_AI) last = i;
+        devcmd_run(text, last >= 0 ? msgs[last].text : "", note, sizeof(note));
+        say("dev: %.200s", note);
+        Msg* nm = msg_new(MSG_NOTE);
+        msg_append(nm, note, strlen(note));
+        view.scroll = 0;
+        return;
+    }
     if (ask_is_cmd(text) || ask_plain) {   // the model asked for files or pages in its last answer: bring them
         int last = -1;
         for (int i = n_msgs - 1; i >= 0 && last < 0; i--)
@@ -1328,8 +1372,21 @@ static void send_text(const char* text) {
         return;
     }
     int pl = webcmd_pending_len();   // text fetched earlier goes first, then the @files
+    int dl = devcmd_pending_len();   // (phase 7: a /mapa or /grep result)
+    if (pl + dl > 16000) dl = 0, devcmd_take_pending(ctx, 0);
+    // How much code fits: the tokens left in the context, less the reply (and a reasoning), the system prompt of a new
+    // chat and the typed text; about 2.7 bytes per token. /limite caps it.
+    int tok_free = (int)eng.ctx_limit - pos - 1100 - (think_on ? think_cap + 64 : 0) - (pos < 1200 ? 1100 : 0) - (int)strlen(text) / 2;
+    int lim = devcmd_token_limit();
+    if (lim > 0 && tok_free > lim) tok_free = lim;
+    int budget = tok_free > 0 ? tok_free * 27 / 10 : 0;
+    if (budget < 3000) budget = 3000;
+    if (budget > (int)sizeof(ctx) - 1) budget = (int)sizeof(ctx) - 1;
+    budget -= pl + dl;
+    if (budget < 1500) budget = 1500;
+    if (pl + dl + budget > (int)sizeof(ctx)) budget = (int)sizeof(ctx) - pl - dl;
     double t0 = now();
-    int r = files_expand(text, ctx + pl, sizeof(ctx) - pl, note, sizeof(note));
+    int r = files_expand(text, ctx + pl + dl, budget, note, sizeof(note));
     if (note[0]) say("files: %s (%.2f s)", note, now() - t0);
     if (note[0]) {
         Msg* m = msg_new(MSG_NOTE);
@@ -1340,7 +1397,11 @@ static void send_text(const char* text) {
         webcmd_take_pending(ctx, pl);
         say("web text attached: %d bytes", pl);
     }
-    turn_files = (r > 0 || pl > 0) ? ctx : NULL;
+    if (dl > 0) {
+        devcmd_take_pending(ctx + pl, dl);
+        say("dev text attached: %d bytes", dl);
+    }
+    turn_files = (r > 0 || pl > 0 || dl > 0) ? ctx : NULL;
     start_turn(text);
     turn_files = NULL;
 }
@@ -1427,6 +1488,92 @@ static int keyboard_ex(char* out, int max, int keep, int over_current) {
 }
 
 static int keyboard(char* out, int max, int keep) { return keyboard_ex(out, max, keep, 0); }
+
+// The file explorer over the chat. Returns 1 with the picked "@..." names in out (to edit and send), 0 if closed or
+// nothing was picked. Mouse, USB keyboard and pad all work (draw_filepick shows the keys).
+static int pick_files(char* out, int max) {
+    static FilePick fpk;
+    fp_open(&fpk);
+    view_update();
+    draw_chat(&view);
+    ui_dim();
+    ui_backdrop_save();
+    uint32_t prev = read_buttons();
+    int mx = SCREEN_W / 2, my = SCREEN_H / 2, has_mouse = input_has_mouse();
+    double rep_next = 0;
+    int result = 0;
+    for (;;) {
+        uint32_t b = read_buttons(), pressed = b & ~prev;
+        prev = b;
+        double t = now();
+        int done = 0, cancel = 0;
+        const uint32_t dirs = b & (ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN);
+        if (pressed & (ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN)) rep_next = t + 0.35;
+        int step = 0;
+        if ((pressed | (dirs && t >= rep_next ? dirs : 0)) & ORBIS_PAD_BUTTON_UP) step = -1;
+        if ((pressed | (dirs && t >= rep_next ? dirs : 0)) & ORBIS_PAD_BUTTON_DOWN) step = 1;
+        if (dirs && t >= rep_next) rep_next = t + 0.07;
+        if (step) fp_move(&fpk, step);
+        if (pressed & ORBIS_PAD_BUTTON_CROSS) fp_enter(&fpk);
+        if (pressed & ORBIS_PAD_BUTTON_SQUARE) fp_toggle(&fpk);
+        if (pressed & ORBIS_PAD_BUTTON_TRIANGLE) fp_up(&fpk);
+        if (pressed & ORBIS_PAD_BUTTON_R2) done = 1;
+        if (pressed & ORBIS_PAD_BUTTON_CIRCLE) cancel = 1;
+        InMouse im;
+        if (input_mouse(&im)) {
+            mx += im.dx, my += im.dy;
+            if (mx < 0) mx = 0;
+            if (mx > SCREEN_W - 1) mx = SCREEN_W - 1;
+            if (my < 0) my = 0;
+            if (my > SCREEN_H - 1) my = SCREEN_H - 1;
+            if (im.wheel) fp_move(&fpk, -im.wheel * 3);
+            unsigned fresh = im.buttons & ~g_mouse_btn;
+            g_mouse_btn = im.buttons;
+            if (fresh & 2) cancel = 1;
+            else if (fresh & 1) {
+                int hit = fp_hit(&fpk, mx, my);
+                if (hit == FP_HIT_DONE) done = 1;
+                else if (hit == FP_HIT_CANCEL) cancel = 1;
+                else fp_click(&fpk, hit);
+            }
+        }
+        InKey ik;
+        while (input_key(&ik)) {
+            if (ik.code == ORBIS_KEYBOARD_KEY_ESCAPE) cancel = 1;
+            else if (ik.code == 62) done = 1;   // F5
+            else if (ik.code == 82) fp_move(&fpk, -1);   // Up
+            else if (ik.code == 81) fp_move(&fpk, 1);   // Down
+            else if (ik.code == ORBIS_KEYBOARD_KEY_PGUP) fp_move(&fpk, -FP_ROWS);
+            else if (ik.code == ORBIS_KEYBOARD_KEY_PGDOWN) fp_move(&fpk, FP_ROWS);
+            else if (ik.code == 74) fp_move(&fpk, -100000);   // Home
+            else if (ik.code == 77) fp_move(&fpk, 100000);    // End
+            else if (ik.code == 80 || ik.code == ORBIS_KEYBOARD_KEY_BACKSPACE) fp_up(&fpk);   // Left / Backspace
+            else if (ik.code == 79) fp_enter(&fpk);   // Right
+            else if (ik.code == 44) fp_toggle(&fpk);  // Space
+            else if (ik.code == ORBIS_KEYBOARD_KEY_RETURN || ik.code == 88) fp_enter(&fpk);
+        }
+        if (cancel) break;
+        if (done) {
+            result = fp_result(&fpk, out, max) > 0;
+            break;
+        }
+        draw_filepick(&fpk, has_mouse ? mx : -1, my, t);
+        present();
+    }
+    return result;
+}
+
+// The explorer, then the keyboard with the picked names in the text to finish the question; Enter sends.
+static void picker_flow(void) {
+    static char typed[2048];
+    typed[0] = 0;
+    if (!pick_files(typed, 1500)) return;
+    say("explorer: %s", typed);
+    if (keyboard(typed, 1500, 1)) {
+        say("user wrote %d bytes (explorer)", (int)strlen(typed));
+        send_text(typed);
+    }
+}
 
 static void utf8_to_utf16(const char* s, wchar_t* out, int max) {
     int n = 0;
@@ -2095,7 +2242,22 @@ int main(void) {
         prev = buttons;
         {   // USB mouse wheel and keyboard (the pad keeps working as before)
             InMouse im;
-            if (input_mouse(&im) && im.wheel) {
+            int mouse_changed = input_mouse(&im);
+            unsigned mouse_new = mouse_changed ? im.buttons & ~g_mouse_btn : 0;
+            if (mouse_changed) g_mouse_btn = im.buttons;
+            if (mouse_new & 2) {   // right click: stop the answer, or (idle) open the file explorer
+                if (generating) finish_turn(0);
+                else pick_due = 1;
+            } else if ((mouse_new & 1) && !generating) {   // left click = write (the keyboard opens)
+                static char clicked[2048];
+                clicked[0] = 0;
+                if (keyboard(clicked, 1500, 1)) {
+                    say("user wrote %d bytes (mouse)", (int)strlen(clicked));
+                    send_text(clicked);
+                }
+                prev = read_buttons();
+            }
+            if (mouse_changed && im.wheel) {
                 int w = im.wheel * 70;   // wheel up = older messages, like the pad's Up
                 if (w > 0) view.scroll += w;
                 else view.scroll = view.scroll > -w ? view.scroll + w : 0;
@@ -2111,6 +2273,16 @@ int main(void) {
                     view.scroll = view.scroll > d ? view.scroll - d : 0;
                 } else if (generating) {
                     if (ik.code == ORBIS_KEYBOARD_KEY_ESCAPE) finish_turn(0);   // Esc = the pad's Circle
+                } else if (ik.code == 62) {   // F5 = the file explorer
+                    pick_due = 1;
+                } else if (ik.code >= 58 && ik.code <= 61) {   // F1 help, F2 agent on/off, F3 network on/off, F4 pack out/
+                    static char fk[40];
+                    snprintf(fk, sizeof(fk), ik.code == 58 ? "/ayuda" : ik.code == 59 ? (devcmd_auto_on() ? "/auto off" : "/auto on")
+                                             : ik.code == 60 ? (webcmd_net_on() ? "/red off" : "/red on") : "/empaquetar");
+                    say("shortcut F%d: %s", ik.code - 57, fk);
+                    send_text(fk);
+                } else if (ctrl && ik.code == 23) {   // Ctrl+T = reasoning on/off (the pad's R3); 23 = the T key
+                    think_toggle();
                 } else if (ctrl && ik.code == 17) {   // Ctrl+N = new chat (the pad's Triangle); 17 = the N key
                     msgs_clear();
                     pos = 0;
@@ -2158,6 +2330,30 @@ int main(void) {
         else if (pressed & (ORBIS_PAD_BUTTON_R3 | ORBIS_PAD_BUTTON_TOUCH_PAD)) think_toggle();
         else if ((pressed & ORBIS_PAD_BUTTON_L3) && !(buttons & PAD_DIRS)) api_toggle();   // (not while scrolling)
         if (!generating && !(buttons & (ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN))) hist_ahead(8);
+        if (!generating && pick_due) {   // the file explorer (F5, right click, /archivos)
+            pick_due = 0;
+            picker_flow();
+            prev = read_buttons();
+        }
+        if (!generating && agent_due) {   // phase 7: the agent applies edits or brings what the answer asked for
+            agent_due = 0;
+            static char nx[1500], no[700];
+            if (n_msgs > 0 && msgs[n_msgs - 1].who == MSG_AI) {
+                int go = devcmd_agent_step(msgs[n_msgs - 1].text, webcmd_net_on(), nx, sizeof(nx), no, sizeof(no));
+                if (no[0]) {
+                    say("agent: %.200s", no);
+                    Msg* nm = msg_new(MSG_NOTE);
+                    msg_append(nm, no, strlen(no));
+                    view.scroll = 0;
+                }
+                if (go) {
+                    agent_msg = 1;
+                    send_text(nx);
+                    agent_msg = 0;
+                    prev = read_buttons();
+                }
+            }
+        }
         if (!generating && inj_ask_ready) {   // (test aid: "ask" in /data/garlic_keys.txt)
             say("user wrote %d bytes (test file)", (int)strlen(inj_ask));
             start_turn(inj_ask);

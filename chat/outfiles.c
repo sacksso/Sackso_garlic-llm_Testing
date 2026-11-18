@@ -95,6 +95,13 @@ static int write_file(const char* rel, const char* data, int n) {
     return 0;
 }
 
+int outfiles_write(const char* rel, const char* data, int n) {
+    if (!path_ok(rel)) return -1;
+    return write_file(rel, data, n);
+}
+
+int outfiles_path_ok(const char* rel) { return path_ok(rel); }
+
 int outfiles_is_cmd(const char* text) {
     while (*text == ' ' || *text == '\n' || *text == '\t') text++;
     int n = (int)strlen(text);
@@ -123,7 +130,8 @@ static void note_add(char* note, int max, const char* fmt, const char* a, long b
 int outfiles_save(const char* reply, char* note, int note_max) {
     note[0] = 0;
     static char body[MAX_BYTES + 1];
-    int written = 0, unnamed = 0, bad = 0;
+    int written = 0, unnamed = 0, bad = 0, edits = 0;
+    char inherit[PATH_MAX_LEN] = {0};   // a name given by a block that turned out empty (see below)
     const char* p = reply;
     const char* prev_line = NULL;   // start of the last non-empty line before the fence
     int prev_len = 0;
@@ -133,6 +141,8 @@ int outfiles_save(const char* reply, char* note, int note_max) {
         if (len >= 3 && !strncmp(p, "```", 3)) {   // an opening fence
             char name[PATH_MAX_LEN] = {0};
             int have = pick_path(p + 3, len - 3, name);
+            if (!have && inherit[0]) strcpy(name, inherit), have = 1;
+            inherit[0] = 0;
             const char* b = eol ? eol + 1 : p + len;
             const char* end = NULL;   // the closing fence: a line that starts with ```
             for (const char* q = b; *q;) {
@@ -160,6 +170,7 @@ int outfiles_save(const char* reply, char* note, int note_max) {
                 if (tag && pick_path(tag + off, (int)(b + l1 - tag - off), name)) {
                     have = 1;
                     if (e1) b = e1 + 1, blen -= l1 + 1;   // the marker line is not part of the file
+                    else blen = 0;                         // (it was the only line)
                 }
             }
             if (!have && prev_line) {   // `path` in backticks on the line before the block
@@ -178,7 +189,31 @@ int outfiles_save(const char* reply, char* note, int note_max) {
                     t = e + 1;
                 }
             }
-            if (!have) unnamed++;
+            {   // the model sometimes writes "```yaml", the name line and then another "```yaml": the first block is only the
+                // name, and the line that looked like its closing fence opens the real one
+                int empty = 1;
+                for (int i = 0; i < blen; i++)
+                    if (b[i] != ' ' && b[i] != '\n' && b[i] != '\t' && b[i] != '\r') empty = 0;
+                const char* eend = strchr(end, '\n');
+                int elen = eend ? (int)(eend - end) : (int)strlen(end);
+                if (have && empty && elen > 3) {
+                    strcpy(inherit, name);
+                    p = end;
+                    prev_line = NULL;
+                    continue;
+                }
+                if (empty) {   // nothing to write
+                    const char* after0 = strchr(end, '\n');
+                    p = after0 ? after0 + 1 : end + strlen(end);
+                    prev_line = NULL;
+                    continue;
+                }
+            }
+            int is_edit = 0;   // SEARCH/REPLACE blocks belong to /aplicar, not to a file
+            for (int i = 0; i + 5 < blen; i++)
+                if ((i == 0 || b[i - 1] == '\n') && !strncmp(b + i, "<<<<<", 5)) is_edit = 1;
+            if (is_edit) edits++;
+            else if (!have) unnamed++;
             else if (written >= MAX_FILES || blen > MAX_BYTES) bad++;
             else {
                 int n = 0;
@@ -201,12 +236,14 @@ int outfiles_save(const char* reply, char* note, int note_max) {
     char tail[160];
     tail[0] = 0;
     if (written) snprintf(tail, sizeof(tail), "Saved %d in " OUT_DIR ". ", written);
+    else if (edits) snprintf(tail, sizeof(tail), "Nothing saved as a file: the answer holds edit blocks, use /aplicar. ");
     else snprintf(tail, sizeof(tail), "Nothing saved: no named code block in the last answer. ");
     char all[320];
     snprintf(all, sizeof(all), "%s%s", tail, note);
     snprintf(note, note_max, "%s", all);
     int l = (int)strlen(note);
     if (unnamed && l < note_max - 1) l += snprintf(note + l, note_max - l, "%d block(s) without a name skipped. ", unnamed);
+    if (edits && written && l < note_max - 1) l += snprintf(note + l, note_max - l, "%d edit block(s) left for /aplicar. ", edits);
     if (bad && l < note_max - 1) snprintf(note + l, note_max - l, "%d block(s) not saved (too big, too many or write error). ", bad);
     return written;
 }

@@ -10,6 +10,7 @@
 
 #include "htmltext.h"
 #include "netget.h"
+#include "files.h"
 
 #define PENDING_MAX 8200
 
@@ -85,6 +86,9 @@ int webcmd_is_cmd(const char* text_) {
     const char* a;
     return parse_cmd(text_, &a) != C_NONE;
 }
+
+int webcmd_net_on(void) { return enabled(); }
+int webcmd_net_set(int on) { set_enabled(on); return enabled(); }
 
 int webcmd_pending_len(void) { return pending_n; }
 
@@ -335,6 +339,39 @@ static void cmd_gh(const char* arg, char* note, int nm) {
         return;
     }
     char url[400], title[160], slug[64], saved[96];
+    if (!strcmp(a2, "zip")) {   // phase 7: the whole repo as a .zip in /data/garlic_files, and it becomes the project
+        static char zbuf[8 * 1024 * 1024];
+        int status = 0;
+        snprintf(url, sizeof(url), "https://api.github.com/repos/%s/%s/zipball/%s", owner, repo, strcmp(ref, "HEAD") ? ref : "");
+        int n = net_get(url, zbuf, sizeof(zbuf), &status);
+        if (n < 0) {
+            snprintf(note, nm, "Network error: %s", net_last_error());
+            return;
+        }
+        if (status >= 400 || n < 100 || zbuf[0] != 'P' || zbuf[1] != 'K') {
+            snprintf(note, nm, "Could not get the zip (HTTP %d, %d bytes%s). A repo bigger than 8 MB does not fit: use /gh owner/repo path for single files.",
+                     status, n, n >= (int)sizeof(zbuf) - 1 ? ", cut at 8 MB" : "");
+            return;
+        }
+        char zn[140], zp[260];
+        snprintf(zn, sizeof(zn), "%s_%s.zip", owner, repo);
+        snprintf(zp, sizeof(zp), "%s/%s", FILES_DIR, zn);
+        int f = open(zp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        int done = 0;
+        while (f >= 0 && done < n) {
+            int k = write(f, zbuf + done, n - done);
+            if (k <= 0) break;
+            done += k;
+        }
+        if (f >= 0) close(f);
+        if (done != n) {
+            snprintf(note, nm, "Could not save %s", zn);
+            return;
+        }
+        files_set_project(zn);
+        snprintf(note, nm, "Saved %s (%d KB) and set it as the project. Try /mapa or /grep words, or @zip:path.", zn, n / 1024);
+        return;
+    }
     int plen = (int)strlen(path);
     if (plen > 0 && path[plen - 1] != '/' && !strchr(path, '*')) {   // one file
         snprintf(url, sizeof(url), "https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, ref, path);
@@ -619,7 +656,8 @@ int webcmd_run(const char* t, char* note, int nm) {
     case C_HELP:
         snprintf(note, nm,
                  "FILES\n@  list   |   @name   |   @repo.zip:path   |   @doc.docx\n/guardar  saves the files of the last answer\n"
-                 "INTERNET (/red on first)\n/web words   /abrir N   /wiki words\n/url https://...   /gh owner/repo [path]\n"
+                 "INTERNET (/red on first)\n/web words   /abrir N   /wiki words\n/url https://...   /gh owner/repo [path | zip]\n"
+                 "PROJECT\n/proyecto zip   /mapa   /grep words   /aplicar   /empaquetar   /auto on|off [N]   /limite N\n"
                  "OTHER\n/estado  state   |   /limpiar  drop fetched text   |   /red on|off\n"
                  "Short forms: /b /o /w /u /g");
         break;

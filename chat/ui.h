@@ -4,6 +4,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include "filepick.h"
 
 #define SCREEN_W 1920
 #define SCREEN_H 1080
@@ -77,6 +78,9 @@ typedef struct {
     // off); api_busy while the model is answering one of its requests
     const char* api;
     int api_busy;
+    // Phase 7: header chips of the agent (auto), the network switch (net) and the project zip (NULL = none)
+    int dev_auto, dev_net;
+    const char* dev_project;
 } ChatView;
 
 void draw_chat(ChatView* v);
@@ -117,6 +121,8 @@ void kb_toggle_emoji(Kb* kb);
 void kb_append(char* out, int max, const char* s);
 void kb_backspace(char* out);
 void draw_keyboard(const Kb* kb, const char* text, double time);
+// The file explorer (filepick.h); (mx, my) is the mouse pointer, -1 when there is no mouse.
+void draw_filepick(const FilePick* f, int mx, int my, double time);
 
 // ---- voice ----
 enum { VOICE_RECORDING, VOICE_TRANSCRIBING };

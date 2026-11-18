@@ -1521,6 +1521,13 @@ static void draw_header(const ChatView* v) {
         snprintf(t, sizeof(t), "%s · %d", tr(S_THINK_CHIP), v->think_cap);
         x = chip(x, cy, t, C_ACCENT_HI, C_ACCENT_HI, 1.0f, -1) - 14;
     }
+    if (v->dev_project && v->dev_project[0]) {   // phase 7: the repo zip "@zip" means
+        char pj[64];
+        snprintf(pj, sizeof(pj), "%.50s", v->dev_project);
+        x = chip(x, cy, pj, 0xFFFFFF, C_GREEN, 1.0f, -1) - 14;
+    }
+    if (v->dev_net) x = chip(x, cy, "RED", C_ACCENT_HI, C_ACCENT_HI, 1.0f, -1) - 14;
+    if (v->dev_auto) x = chip(x, cy, "AUTO", C_ACCENT_HI, C_ACCENT_HI, 1.0f, -1) - 14;
     if (v->api)   // the API is on: where it listens (the dot pulses while it answers a request)
         x = chip(x, cy, v->api, 0xFFFFFF, v->api_busy ? C_ACCENT_HI : C_GREEN, v->api_busy ? pulse : 1.0f, -1) - 14;
     if (v->generating && v->tok_per_s > 0) {
@@ -2078,6 +2085,87 @@ void draw_keyboard(const Kb* kb, const char* text, double time) {
     while (k > 0 && !strcmp(kb_key(kb, kb->row, k - 1), kb_key(kb, kb->row, k))) k--;   // first column of a wide key
     kb_draw_key(kb, kb->row, k, x0, y0, 1);
     draw_field(x0, y, KEYS_W, text, time);
+}
+
+// ---- file explorer (filepick.h) --------------------------------------------------------------------------------
+
+static void fp_size(char* out, long n) {
+    if (n < 1024) snprintf(out, 24, "%ld B", n);
+    else if (n < 1024 * 1024) snprintf(out, 24, "%.1f KB", n / 1024.0);
+    else snprintf(out, 24, "%.1f MB", n / 1048576.0);
+}
+
+static void fp_button(int x, int y, int w, int h, const char* label, uint32_t fill, uint32_t text, int hot) {
+    rrect(x, y, w, h, 16, hot ? C_ACCENT_HI : fill, 255);
+    rrect_line(x, y, w, h, 16, 1, C_LINE_HI, 255);
+    draw_center(&font, x + w / 2, y + (h - font.line) / 2, label, text);
+}
+
+void draw_filepick(const FilePick* f, int mx, int my, double time) {
+    (void)time;
+    ui_backdrop_draw();
+    rrect(FP_X, FP_Y, FP_W, FP_H, 30, C_PANEL, 255);
+    rrect_line(FP_X, FP_Y, FP_W, FP_H, 30, 1, C_LINE_HI, 255);
+    char where[400];
+    if (f->zip[0]) snprintf(where, sizeof(where), "Archivos  /  %s  /  %s", f->zip, f->zdir + (f->zroot < (int)strlen(f->zdir) ? f->zroot : (int)strlen(f->zdir)));
+    else snprintf(where, sizeof(where), "Archivos  /  %s", f->dir);
+    set_clip(FP_X + 30, FP_Y + 10, FP_X + FP_W - 30, FP_Y + 90);
+    draw_str(&font_big, FP_X + 40, FP_Y + 24, where, 0xFFFFFF);
+    set_clip(0, 0, SCREEN_W, SCREEN_H);
+    int hover = fp_hit(f, mx, my);
+    for (int r = 0; r < FP_ROWS && f->top + r < f->n; r++) {
+        int i = f->top + r, y = FP_LIST_Y + r * FP_ROW_H;
+        const FpEnt* e = &f->ent[i];
+        int is_cur = i == f->cur, is_hover = hover == i || hover == FP_HIT_CHECK + i;
+        if (is_cur || is_hover) rrect(FP_X + 20, y, FP_W - 40, FP_ROW_H - 4, 12, is_cur ? C_SURFACE_HI : C_SURFACE, 255);
+        if (is_cur) rrect_line(FP_X + 20, y, FP_W - 40, FP_ROW_H - 4, 12, 1, C_ACCENT_HI, 255);
+        int cy = y + (FP_ROW_H - 4) / 2;
+        if (!e->is_dir) {   // check box
+            int on = fp_is_picked(f, i);
+            rrect(FP_X + 44, cy - 14, 28, 28, 7, on ? C_GREEN : C_KEY, 255);
+            rrect_line(FP_X + 44, cy - 14, 28, 28, 7, 1, C_LINE_HI, 255);
+            if (on) {
+                line(FP_X + 50, cy, FP_X + 57, cy + 7, 3, C_PANEL, 255);
+                line(FP_X + 57, cy + 7, FP_X + 67, cy - 7, 3, C_PANEL, 255);
+            }
+        }
+        char nm[96];
+        snprintf(nm, sizeof(nm), "%s%s", e->name, e->is_dir ? "/" : "");
+        uint32_t col = e->is_dir ? C_ACCENT_HI : e->is_zip ? C_GREEN : C_TEXT;
+        draw_str(&font, FP_X + 100, y + (FP_ROW_H - 4 - font.line) / 2, nm, col);
+        if (e->is_zip) draw_str(&font_small, FP_X + 760, cy - font_small.line / 2, "zip: Enter abre, marcar = mapa", C_TEXT_MUTED);
+        if (!e->is_dir) {
+            char sz[24];
+            fp_size(sz, e->size);
+            draw_str(&font_small, FP_X + FP_W - 60 - str_width(&font_small, sz), cy - font_small.line / 2, sz, C_TEXT_DIM);
+        }
+    }
+    if (f->n == 0) draw_str(&font, FP_X + 100, FP_LIST_Y + 10, "(vacio)", C_TEXT_MUTED);
+    if (f->n > FP_ROWS) {   // scroll bar
+        int bh = FP_ROWS * FP_ROW_H - 8, th = bh * FP_ROWS / f->n;
+        if (th < 30) th = 30;
+        int ty = FP_LIST_Y + 4 + (bh - th) * f->top / (f->n - FP_ROWS);
+        rrect(FP_X + FP_W - 18, ty, 6, th, 3, C_LINE_HI, 255);
+    }
+    char sel[600];
+    int sl = snprintf(sel, sizeof(sel), "Elegidos (%d): ", f->npicked);
+    for (int k = 0; k < f->npicked && sl < (int)sizeof(sel) - 150; k++) sl += snprintf(sel + sl, sizeof(sel) - sl, "%s  ", f->picked[k]);
+    set_clip(FP_X + 30, FP_BTN_Y - 70, FP_X + FP_W - 30, FP_BTN_Y - 6);
+    draw_str(&font_small, FP_X + 40, FP_BTN_Y - 62, sel, f->npicked ? C_GREEN : C_TEXT_MUTED);
+    if (f->msg[0] || f->truncated) draw_str(&font_small, FP_X + 40, FP_BTN_Y - 34, f->msg[0] ? f->msg : "Hay mas archivos de los que se muestran", C_CIRCLE);
+    set_clip(0, 0, SCREEN_W, SCREEN_H);
+    fp_button(FP_UP_X, FP_BTN_Y, FP_UP_W, FP_BTN_H, "Subir", C_KEY, C_TEXT, hover == FP_HIT_UP);
+    fp_button(FP_CANCEL_X, FP_BTN_Y, FP_CANCEL_W, FP_BTN_H, "Cancelar", C_KEY, C_TEXT, hover == FP_HIT_CANCEL);
+    fp_button(FP_DONE_X, FP_BTN_Y, FP_DONE_W, FP_BTN_H, f->npicked ? "Adjuntar" : "Listo", C_ACCENT, 0xFFFFFF, hover == FP_HIT_DONE);
+    const int y = SCREEN_H - FOOTER_H, cy = y + FOOTER_H / 2;
+    memcpy(back + y * SCREEN_W, bg + y * SCREEN_W, FOOTER_H * SCREEN_W * 4);
+    draw_str(&font_small, 72, cy - font_small.line / 2,
+             "Flechas / rueda: mover   Enter o clic: abrir o marcar   Espacio: marcar   Retroceso: subir   F5 / Adjuntar: terminar   Esc / clic derecho: cancelar",
+             C_TEXT_DIM);
+    if (mx >= 0) {   // the mouse pointer
+        circle((float)mx, (float)my, 9, 0, 0xFFFFFF, 255);
+        circle((float)mx, (float)my, 9, 2, C_ACCENT, 255);
+    }
 }
 
 // ---- voice -------------------------------------------------------------------------------------------------------

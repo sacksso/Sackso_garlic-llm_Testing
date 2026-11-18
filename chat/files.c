@@ -1,6 +1,7 @@
 // Text files for the chat (see files.h).
 #include "files.h"
 #include "zipread.h"
+#include "repomap.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -13,7 +14,7 @@
 #define NAME_MAX_LEN 96
 
 static int ok_name_char(unsigned char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+';
 }
 
 static int cmp(const void* a, const void* b) { return strcmp((const char*)a, (const char*)b); }
@@ -114,6 +115,10 @@ static int starts_with(const char* s, const char* p) { return !strncmp(s, p, str
 
 // ---- friendlier names (phase 6) ----------------------------------------------------------------------------------
 static char last_zip[NAME_MAX_LEN];   // the zip used last: "@zip", "@repo" or "@:path" mean it
+static int g_att_a, g_att_b;           // lines of the last part read (0 = the whole file)
+static char g_last_rel[100];          // path inside the zip of the last file read (without the repo-main/ folder)
+static FilesAttached g_att[FILES_ATT_MAX];
+static int g_natt;
 
 static int lc(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 
@@ -217,15 +222,15 @@ static int resolve_base(char* base, char* sugg, int sugg_max) {
 
 // "Key files" that follow the list of a whole zip, so the model sees the project's purpose and its build without
 // the user asking for each one: README (top level) and the first workflows. Appends to out (at o), returns the new o.
-static int zip_key_files(const char* path, const ZipEnt* ents, int n, int tl, char* out, int o, int max) {
+static int zip_key_files(const char* path, const ZipEnt* ents, int n, int tl, char* out, int o, int max, int readme_budget, int max_flows, int flow_budget) {
     static char tmp[3200];
     int done_readme = 0, flows = 0;
     for (int i = 0; i < n && o < max - 600; i++) {
         const char* rel = ents[i].name + tl;
         int is_readme = !done_readme && !strchr(rel, '/') && prefix_ci(rel, "readme") && !strcasecmp(rel, "readme.md");
-        int is_flow = flows < 2 && prefix_ci(rel, ".github/workflows/") && (ends_ci(rel, ".yml") || ends_ci(rel, ".yaml"));
+        int is_flow = flows < max_flows && prefix_ci(rel, ".github/workflows/") && (ends_ci(rel, ".yml") || ends_ci(rel, ".yaml"));
         if (!is_readme && !is_flow) continue;
-        int budget = 2000;
+        int budget = is_readme ? readme_budget : flow_budget;
         int cut = 0;
         int r = zip_read(path, &ents[i], tmp, budget < (int)sizeof(tmp) ? budget : (int)sizeof(tmp) - 1, &cut);
         if (r <= 0) continue;
@@ -249,12 +254,13 @@ static int zip_key_files(const char* path, const ZipEnt* ents, int n, int tl, ch
 // (out holds their names), -4 binary, -5 damaged or unsupported.
 static int read_special(const char* name, char* out, int max, long* size, int* cut) {
     char base[NAME_MAX_LEN];
-    const char* colon = strchr(name, ':');
+    const char* colon = strpbrk(name, ":?");
     int bl = colon ? (int)(colon - name) : (int)strlen(name);
     if (bl <= 0 || bl >= NAME_MAX_LEN) return -2;
     memcpy(base, name, bl);
     base[bl] = 0;
     const char* spec = colon ? colon + 1 : NULL;
+    int is_query = colon && *colon == '?';
     int is_zip = ends_ci(base, ".zip");
     int is_office = ends_ci(base, ".docx") || ends_ci(base, ".pptx") || ends_ci(base, ".xlsx") || ends_ci(base, ".odt") ||
                     ends_ci(base, ".ods") || ends_ci(base, ".odp");
@@ -273,6 +279,26 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
     if (n == -1) return -1;
     if (n < 0) return -5;
     int sl = spec ? (int)strlen(spec) : 0;
+    g_last_rel[0] = 0;
+    if (is_query) {   // @repo.zip?word1+word2: the parts of the repo that mention them (phase 7)
+        int r = repo_search(path, spec, out, max < 9000 ? max : 9000, 3, NULL, NULL);
+        if (r < 0) return -5;
+        *size = (long)strlen(out);
+        return (int)*size;
+    }
+    if (sl == 0) {   // the whole zip: a map of the repo (functions with their lines) + README + the first workflow
+        int nsrc = 0;
+        int mapmax = max < 9500 ? max * 6 / 10 : 5700 + (max - 9500) / 4;
+        if (mapmax > 9000) mapmax = 9000;
+        int m = repomap_build(path, out, mapmax, &nsrc);
+        if (m > 0 && nsrc > 0) {
+            int tl2 = repo_root_len(ents, n);
+            int o = zip_key_files(path, ents, n, tl2, out, m, max, 1500, 1, 1800);
+            *size = o;
+            if (n < total) *cut = 1;
+            return o;
+        }
+    }
     if (sl == 0 || spec[0] == '*' || spec[sl - 1] == '/') {   // the list, or a part of it
         int tl = 0;   // a folder shared by every path ("repo-main/", as GitHub makes them) is left out of the lines
         const char* first = n > 0 ? strchr(ents[0].name, '/') : NULL;
@@ -311,9 +337,38 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         if (hidden && o < max - 120) o += snprintf(out + o, max - o, "(+%d binary files not listed; @%.60s:*.bin etc. lists them)\n", hidden, base);
         if (n < total) *cut = 1;
         if (sl && shown == 0 && !hidden) return -1;
-        if (sl == 0) o = zip_key_files(path, ents, n, tl, out, o, max);   // README and workflows come along
+        if (sl == 0) o = zip_key_files(path, ents, n, tl, out, o, max, 2000, 2, 2000);   // README and workflows come along
         *size = o;
         return o;
+    }
+    char fspec[ZIP_NAME_MAX + 8], sym[64] = "";
+    int ra = 0, rb = 0;
+    snprintf(fspec, sizeof(fspec), "%s", spec);
+    {
+        char* hash = strchr(fspec, '#');
+        if (hash) {   // @zip:path#function
+            *hash = 0;
+            snprintf(sym, sizeof(sym), "%s", hash + 1);
+        } else {      // @zip:path:A-B  or  @zip:path:A
+            char* c2 = strrchr(fspec, ':');
+            if (c2 && c2[1] >= '0' && c2[1] <= '9') {
+                char* q = c2 + 1;
+                ra = 0;
+                while (*q >= '0' && *q <= '9') ra = ra * 10 + (*q++ - '0');
+                rb = ra;
+                if (*q == '-') {
+                    q++;
+                    rb = 0;
+                    while (*q >= '0' && *q <= '9') rb = rb * 10 + (*q++ - '0');
+                    if (rb == 0) rb = 1 << 29;
+                }
+                if (*q == 0) *c2 = 0;
+                else ra = rb = 0;
+            }
+        }
+        if (!fspec[0]) return -1;
+        spec = fspec;
+        sl = (int)strlen(fspec);
     }
     const ZipEnt* hit = NULL;
     int hits = 0;
@@ -342,8 +397,38 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         }
         return -3;
     }
+    {   // remember where it is (for the repo search and the edits), without the repo-main/ folder
+        int tl3 = repo_root_len(ents, n);
+        snprintf(g_last_rel, sizeof(g_last_rel), "%s", hit->name + tl3);
+    }
+    if (ra > 0 || sym[0]) {   // part of a file: read it whole (up to 200 KB) and cut the lines out
+        static char big[200001];
+        int bc = 0;
+        int br = zip_read(path, hit, big, sizeof(big) - 1, &bc);
+        if (br < 0) return -5;
+        int w = 0;
+        for (int i = 0; i < br; i++)
+            if (big[i] != 0 && big[i] != '\r') big[w++] = big[i];
+        big[w] = 0;
+        int tot = 0, a2 = ra, b2 = rb;
+        if (sym[0]) {
+            if (!repo_symbol_range(g_last_rel, big, w, sym, &a2, &b2)) {
+                snprintf(out, max, "%s", sym);
+                return -6;
+            }
+        }
+        int o = repo_extract_lines(big, w, a2, b2, out, max, &tot);
+        if (o <= 0) {
+            snprintf(out, max, "%d", tot);
+            return -7;
+        }
+        *size = hit->usize;
+        *cut = 0;
+        g_att_a = a2, g_att_b = b2 > tot ? tot : b2;
+        return o;
+    }
     int r = zip_read(path, hit, out, max, cut);
-    if (r < 0) return hit->method == 0xFFFF ? -5 : -5;
+    if (r < 0) return -5;
     int zeros = 0, lim2 = r < 400 ? r : 400;
     for (int i = 0; i < lim2; i++) zeros += (unsigned char)out[i] < 9 || ((unsigned char)out[i] > 13 && (unsigned char)out[i] < 32);
     if (zeros * 20 > lim2) return -4;
@@ -365,6 +450,7 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
     ctx[0] = 0;
     note[0] = 0;
     int used = 0, attached = 0, asked = 0;
+    g_natt = 0;
     char seen[8][NAME_MAX_LEN];
     for (const char* p = text; *p; p++) {
         if (*p != '@' || (p != text && p[-1] != ' ' && p[-1] != '\n' && p[-1] != '\t')) continue;
@@ -373,6 +459,7 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         while (l < NAME_MAX_LEN - 1 && ok_name_char((unsigned char)p[1 + l])) l++;
         memcpy(name, p + 1, l);
         name[l] = 0;
+        while (l > 0 && (name[l - 1] == '?' || name[l - 1] == '+' || name[l - 1] == '#')) name[--l] = 0;   // "@zip?" at the end of a sentence
         if (l == 0 || strstr(name, "..") || strstr(name, "//") || name[0] == '/' || (name[l - 1] == '/' && !strchr(name, ':'))) continue;
         int dup = 0;
         for (int i = 0; i < asked && i < 8; i++)
@@ -380,12 +467,12 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         if (dup) continue;
         if (asked < 8) strcpy(seen[asked], name);
         asked++;
-        static char body[20000];
+        static char body[48000];
         long size = 0;
         char shown[NAME_MAX_LEN + 8];   // what the note and the header call it
         strcpy(shown, name);
         {   // phase 6: "@zip", "@:path", a name start, or a typo of a file name
-            char* colon = strchr(name, ':');
+            char* colon = strpbrk(name, ":?");
             char base[NAME_MAX_LEN], rest[NAME_MAX_LEN];
             int bl2 = colon ? (int)(colon - name) : (int)strlen(name);
             memcpy(base, name, bl2);
@@ -415,12 +502,15 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
             if (ends_ci(base, ".zip")) strcpy(last_zip, base);
         }
         int zcut = 0;
+        g_att_a = g_att_b = 0;
         int n = read_special(name, body, sizeof(body), &size, &zcut);
         if (n == -2) n = read_file(name, body, sizeof(body), &size);
         if (n < 0) {
             if (n == -3) note_add(note, note_max, "@%s: several files match, say the path: ", name, 0), note_add(note, note_max, "%s. ", body, 0);
             else if (n == -4) note_add(note, note_max, "@%s: not a text file (binary). ", name, 0);
             else if (n == -5) note_add(note, note_max, "@%s: cannot be read (damaged, zip64 or unsupported). ", name, 0);
+            else if (n == -6) note_add(note, note_max, "@%s: no such function or heading. ", name, 0), note_add(note, note_max, "Try @zip?%s. ", body, 0);
+            else if (n == -7) note_add(note, note_max, "@%s: that line range is empty (the file has ", name, 0), note_add(note, note_max, "%s lines). ", body, 0);
             else note_add(note, note_max, "@%s: not found. ", name, 0);
             continue;
         }
@@ -436,16 +526,37 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         if (n > room) n = cut_clean(body, room), cut = 1;
         else if (size > (long)sizeof(body) - 1 || zcut) cut = 1;
         if (n > 0 && body[n - 1] == '\n') n--;
+        char marker[220] = "";
+        if (cut && !g_att_a && strchr(name, ':') && strncmp(name, "web/", 4)) {   // tell the model the file goes on
+            snprintf(marker, sizeof(marker), "(cut: %d of %ld bytes shown; the rest with @%.80s:A-B, a line range, or @%.80s#function)\n", n, size, name, name);
+            if ((int)strlen(marker) > room - n) marker[0] = 0;
+        }
         memcpy(ctx + used, head, hl);
         used += hl;
         memcpy(ctx + used, body, n);
         used += n;
         memcpy(ctx + used, tail, strlen(tail));
         used += strlen(tail);
+        if (marker[0]) {
+            int ml = (int)strlen(marker);
+            memcpy(ctx + used, marker, ml);
+            used += ml;
+        }
         ctx[used] = 0;
         attached++;
+        if (g_last_rel[0] && g_natt < FILES_ATT_MAX) {
+            snprintf(g_att[g_natt].path, sizeof(g_att[0].path), "%s", g_last_rel);
+            g_att[g_natt].a = g_att_a ? g_att_a : 1;
+            g_att[g_natt].b = g_att_a ? g_att_b : 1 << 29;
+            g_natt++;
+        }
         if (cut) note_add(note, note_max, "@%s: cut to the first %ld bytes. ", name, n);
-        else note_add(note, note_max, "@%s attached (%ld bytes). ", name, size);
+        else if (g_att_a) {
+            char lr[200];
+            snprintf(lr, sizeof(lr), "@%.80s attached (lines %d-%d). ", name, g_att_a, g_att_b);
+            int nl = (int)strlen(note);
+            if (nl < note_max - 1) snprintf(note + nl, note_max - nl, "%s", lr);
+        } else note_add(note, note_max, "@%s attached (%ld bytes). ", name, size);
     }
     const char* q = text;   // a message that is only "@": list the files and send nothing to the model
     while (*q == ' ' || *q == '\n') q++;
@@ -461,4 +572,92 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         return -1;
     }
     return attached;
+}
+
+// ---- phase 7: what the dev commands (devcmd.c) need from here ---------------------------------------------------
+
+int files_attached(FilesAttached* out, int max) {
+    int n = g_natt < max ? g_natt : max;
+    memcpy(out, g_att, sizeof(FilesAttached) * n);
+    return n;
+}
+
+void files_set_project(const char* zip_name) {
+    snprintf(last_zip, sizeof(last_zip), "%s", zip_name ? zip_name : "");
+}
+
+const char* files_project(void) { return last_zip; }
+
+int files_resolve_zip(const char* typed, char* name_out, int max, char* sugg, int sugg_max) {
+    char base[NAME_MAX_LEN];
+    snprintf(base, sizeof(base), "%s", typed ? typed : "");
+    int how = resolve_base(base, sugg, sugg_max);
+    if (how < 0) return 0;
+    if (!ends_ci(base, ".zip")) {
+        snprintf(sugg, sugg_max, "%.60s is not a .zip", base);
+        return 0;
+    }
+    snprintf(name_out, max, "%s", base);
+    return 1;
+}
+
+// The entry of the project zip for "path", "folder/path" without the repo-main/ part, or a unique file name.
+// Returns it (0 when none or several); ents/n are the table of zip_open_dir, zpath the zip's path.
+static const ZipEnt* find_project_entry(const char* spec, const ZipEnt** ents, int* n, char* zpath, int zmax) {
+    if (!last_zip[0] || !file_exists(last_zip) || !spec[0]) return NULL;
+    snprintf(zpath, zmax, FILES_DIR "/%s", last_zip);
+    int total;
+    *n = zip_open_dir(zpath, ents, &total);
+    if (*n < 0) return NULL;
+    int slen = (int)strlen(spec);
+    const ZipEnt* hit = NULL;
+    int hits = 0;
+    for (int pass = 0; pass < 3 && !hits; pass++)
+        for (int i = 0; i < *n; i++) {
+            const char* nm = (*ents)[i].name;
+            int ok = 0;
+            if (pass == 0) ok = !strcmp(nm, spec);
+            else if (pass == 1) {
+                const char* sub = strchr(nm, '/');
+                ok = sub && !strcmp(sub + 1, spec);
+            } else {
+                int nl = (int)strlen(nm);
+                ok = nl > slen && nm[nl - slen - 1] == '/' && !strcmp(nm + nl - slen, spec);
+            }
+            if (ok) hit = &(*ents)[i], hits++;
+        }
+    return hits == 1 ? hit : NULL;
+}
+
+// Path inside the zip (without the repo-main/ folder) of what spec names. 1 found, 0 not found, -3 no project.
+int files_project_resolve(const char* spec, char* rel, int rel_max) {
+    if (!last_zip[0] || !file_exists(last_zip)) return -3;
+    const ZipEnt* ents;
+    int n;
+    char zp[200];
+    const ZipEnt* hit = find_project_entry(spec, &ents, &n, zp, sizeof(zp));
+    if (!hit) return 0;
+    snprintf(rel, rel_max, "%s", hit->name + repo_root_len(ents, n));
+    return 1;
+}
+
+// Returns the whole file into out (raw: CRs kept), *len its size, rel its path inside the zip.
+// 1 = ok, 0 = not found, -1 = bigger than max, -2 = binary or damaged, -3 = no project.
+int files_project_read(const char* spec, char* out, int max, int* len, char* rel, int rel_max) {
+    if (!last_zip[0] || !file_exists(last_zip)) return -3;
+    const ZipEnt* ents;
+    int n;
+    char path[200];
+    const ZipEnt* hit = find_project_entry(spec, &ents, &n, path, sizeof(path));
+    if (!hit) return 0;
+    if (hit->usize >= (uint32_t)max) return -1;
+    int cut = 0;
+    int r = zip_read(path, hit, out, max - 1, &cut);
+    if (r < 0 || cut) return -2;
+    for (int i = 0; i < r && i < 400; i++)
+        if ((unsigned char)out[i] == 0) return -2;
+    *len = r;
+    out[r] = 0;
+    snprintf(rel, rel_max, "%s", hit->name + repo_root_len(ents, n));
+    return 1;
 }

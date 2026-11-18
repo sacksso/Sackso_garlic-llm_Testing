@@ -36,4 +36,8 @@ int webcmd_run(const char* text, char* note, int note_max);
 int webcmd_pending_len(void);
 int webcmd_take_pending(char* dst, int max);
 
+// 1 when the network switch is on. webcmd_net_set turns it on/off (the user's own action: key F3 or /red).
+int webcmd_net_on(void);
+int webcmd_net_set(int on);
+
 #endif
