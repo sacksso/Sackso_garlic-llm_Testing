@@ -5,6 +5,9 @@ W=$(mktemp -d)
 FL="-std=gnu99 -g -Wall -Wextra -fsanitize=address,undefined -Ichat"
 gcc $FL tests/patch_test.c chat/patch.c -o $W/patch_test && $W/patch_test
 gcc $FL -DPROGRESS_FILE="\"$W/progreso.txt\"" tests/progress_test.c chat/progress.c -o $W/progress_test && $W/progress_test > /dev/null && echo progress_test: ok
+# phase 9: projects, files into the active project, placeholder filter
+mkdir -p $W/ws/garlic_files
+gcc $FL -DWS_ROOT="\"$W/ws/garlic_projects\"" -DWS_OUT_ROOT="\"$W/ws/garlic_files/out\"" -DWS_STATE_FILE="\"$W/ws/proyecto.txt\"" -DWS_LEGACY_PROGRESS="\"$W/ws/progreso.txt\"" tests/workspace_test.c chat/workspace.c chat/outfiles.c chat/ask.c -o $W/workspace_test && $W/workspace_test
 mkdir -p $W/src/chat $W/dir
 printf 'int send_text(const char* t) {\n  return 0;\n}\nint other(void) {\n  return 1;\n}\n' > $W/src/chat/main.c
 printf '# Title\n\nSome text\n' > $W/src/README.md
@@ -32,4 +35,8 @@ with zipfile.ZipFile(w + "/root/repo.zip", "w") as z:
 PY
 gcc $FL -DFILES_DIR="\"$W/root\"" tests/filepick_test.c chat/filepick.c chat/repomap.c chat/zipread.c chat/htmltext.c -o $W/filepick_test
 $W/filepick_test
+# phase 9 through the commands
+mkdir -p $W/d9/files $W/d9/ws
+cp $W/t.zip $W/d9/files/repo.zip
+gcc $FL -DFILES_DIR="\"$W/d9/files\"" -DDEV_FLAG_FILE="\"$W/d9/dev.txt\"" -DWS_ROOT="\"$W/d9/ws/projects\"" -DWS_OUT_ROOT="\"$W/d9/files/out\"" -DWS_STATE_FILE="\"$W/d9/ws/proyecto.txt\"" -DWS_LEGACY_PROGRESS="\"$W/d9/ws/progreso.txt\"" tests/dev9_test.c chat/devcmd.c chat/files.c chat/repomap.c chat/zipread.c chat/zipwrite.c chat/htmltext.c chat/progress.c chat/patch.c chat/ask.c chat/workspace.c chat/outfiles.c -o $W/dev9_test && $W/dev9_test
 rm -rf $W
