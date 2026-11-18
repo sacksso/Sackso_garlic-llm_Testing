@@ -93,6 +93,20 @@ int main(void) {
     int sl = 2;
     CHECK(patch_apply(small, &sl, sizeof small, &big, 1, &line, &how, hint, 400) == -3);
 
+    // phase 8: the balance of () {} [] outside comments and strings
+    {
+        int a[3], c[3];
+        const char* src = "int f(int x) {\n  // } ( [\n  char c = '}';\n  const char* s = \"{[(\";\n  /* ) */\n  return g(x)[0];\n}\n";
+        CHECK(patch_balance("a.c", src, (int)strlen(src), a) == 1);
+        CHECK(a[0] == 0 && a[1] == 0 && a[2] == 0);
+        const char* open = "int f(int x) {\n  if (x) {\n    return 1;\n}\n";
+        CHECK(patch_balance("x/y.js", open, (int)strlen(open), c) == 1 && c[1] == 1 && c[0] == 0);
+        const char* rust = "fn f<'a>(x: &'a str) { let c = 'x'; }\n";
+        CHECK(patch_balance("m.rs", rust, (int)strlen(rust), c) == 1 && c[0] == 0 && c[1] == 0);
+        CHECK(patch_balance("notes.md", open, (int)strlen(open), c) == 0);   // not a checked type
+        CHECK(patch_balance("README", open, (int)strlen(open), c) == 0);
+    }
+
     printf(fails ? "patch_test: %d FAILED\n" : "patch_test: ok\n", fails);
     return fails != 0;
 }

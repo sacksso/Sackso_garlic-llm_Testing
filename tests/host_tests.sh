@@ -4,6 +4,7 @@ set -e
 W=$(mktemp -d)
 FL="-std=gnu99 -g -Wall -Wextra -fsanitize=address,undefined -Ichat"
 gcc $FL tests/patch_test.c chat/patch.c -o $W/patch_test && $W/patch_test
+gcc $FL -DPROGRESS_FILE="\"$W/progreso.txt\"" tests/progress_test.c chat/progress.c -o $W/progress_test && $W/progress_test > /dev/null && echo progress_test: ok
 mkdir -p $W/src/chat $W/dir
 printf 'int send_text(const char* t) {\n  return 0;\n}\nint other(void) {\n  return 1;\n}\n' > $W/src/chat/main.c
 printf '# Title\n\nSome text\n' > $W/src/README.md
