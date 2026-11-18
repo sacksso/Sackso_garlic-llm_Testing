@@ -32,6 +32,7 @@ typedef int (*FnHttpInit)(int, int, size_t);
 typedef int (*FnCreateTemplate)(int, const char*, int, int);
 typedef int (*FnSetTimeout)(int, uint32_t);
 typedef int (*FnSetInt)(int, int);
+typedef int (*FnSetSize)(int, size_t);
 typedef int (*FnDisableOpt)(int, uint32_t);
 typedef int (*FnCreateConn)(int, const char*, int);
 typedef int (*FnCreateReq)(int, int, const char*, uint64_t);
@@ -49,6 +50,7 @@ static struct {
     FnCreateTemplate create_template;
     FnSetTimeout set_connect, set_resolve, set_send, set_recv;
     FnSetInt set_redirect;
+    FnSetSize set_hdr_max;     // sceHttpSetResponseHeaderMaxSize (optional)
     FnDisableOpt https_disable;
     FnCreateConn create_conn;
     FnCreateReq create_req;
@@ -115,6 +117,7 @@ static int setup(void) {
     F.set_send = (FnSetTimeout)sym(mhttp, "sceHttpSetSendTimeOut");
     F.set_recv = (FnSetTimeout)sym(mhttp, "sceHttpSetRecvTimeOut");
     F.set_redirect = (FnSetInt)sym(mhttp, "sceHttpSetAutoRedirect");
+    F.set_hdr_max = (FnSetSize)sym(mhttp, "sceHttpSetResponseHeaderMaxSize");
     F.https_disable = (FnDisableOpt)sym(mhttp, "sceHttpsDisableOption");
     F.create_conn = (FnCreateConn)sym(mhttp, "sceHttpCreateConnectionWithURL");
     F.create_req = (FnCreateReq)sym(mhttp, "sceHttpCreateRequestWithURL");
@@ -155,6 +158,9 @@ static int get_once(const char* url, char* out, int max, int* status, int verify
     if (F.set_send) F.set_send(tmpl, 10000000);
     if (F.set_recv) F.set_recv(tmpl, 15000000);
     if (F.set_redirect) F.set_redirect(tmpl, 1);
+    // GitHub, Wikipedia and others answer with big headers: with the default limit sceHttpSendRequest fails with
+    // 0x80431073 (found with psbrowser: 128 KB fixes it)
+    if (F.set_hdr_max) F.set_hdr_max(tmpl, 128 * 1024);
     if (!verify && F.https_disable) F.https_disable(tmpl, 0x3f);
     int ret = -1;
     int conn = F.create_conn(tmpl, url, 0), req = -1;

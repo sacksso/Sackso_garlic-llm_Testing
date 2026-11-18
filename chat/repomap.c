@@ -119,6 +119,7 @@ typedef struct {
     const char* want;   // search mode: stop at the first symbol with this name
     int found_line;
     int found_indent;
+    int after_line;     // search mode: ignore matches at or before this line (to skip a prototype)
 } Sink;
 
 static int name_matches(const char* name, const char* want) {
@@ -139,7 +140,7 @@ static int sink_add(Sink* k, const char* s, int len, int line) {
         char tmp[SYM_NAME_MAX + 1];
         memcpy(tmp, s, len);
         tmp[len] = 0;
-        if (name_matches(tmp, k->want)) {
+        if (line > k->after_line && name_matches(tmp, k->want)) {
             k->found_line = line;
             return 1;
         }
@@ -1033,6 +1034,23 @@ int repo_symbol_range(const char* name_of_file, const char* text, int len, const
     if (!k.found_line) return 0;
     int nl = index_lines(text, len);
     int a = k.found_line, b = a;
+    if (lang == L_C) {
+        // a forward declaration ("static void f(E* e);" near the top) comes before the definition: if the match has no
+        // body, look for the next one that does (up to 12 matches); else keep the first
+        int cur = a;
+        for (int tries = 0; tries < 12 && cur; tries++) {
+            if (brace_end_line(text, len, nl, cur) > 0) {
+                a = b = cur;
+                break;
+            }
+            Sink k2;
+            memset(&k2, 0, sizeof(k2));
+            k2.want = name;
+            k2.after_line = cur;
+            scan_symbols(&k2, lang, name_of_file, text, len);
+            cur = k2.found_line;
+        }
+    }
     if (lang == L_PY) {
         int ind = line_indent(text, a);
         b = a;

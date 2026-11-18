@@ -413,6 +413,20 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         int tot = 0, a2 = ra, b2 = rb;
         if (sym[0]) {
             if (!repo_symbol_range(g_last_rel, big, w, sym, &a2, &b2)) {
+                // the model guessed the wrong file (it happens a lot): look for the name in the whole repo and bring
+                // what mentions it, saying so, instead of an error that makes it ask again for the same thing
+                static char found[9001];
+                int fr = repo_search(path, sym, found, max < 6000 ? max - 200 : 6000, 2, NULL, NULL);
+                if (fr > 0 && found[0]) {
+                    int o2 = snprintf(out, max, "(There is no %s in %s; these are the places of the repo that mention it:)\n%s", sym,
+                                      g_last_rel, found);
+                    if (o2 > 0 && o2 < max) {
+                        *size = (long)o2;
+                        *cut = 0;
+                        g_att_a = g_att_b = 0;
+                        return o2;
+                    }
+                }
                 snprintf(out, max, "%s", sym);
                 return -6;
             }
@@ -524,7 +538,7 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         }
         int cut = 0;
         if (n > room) n = cut_clean(body, room), cut = 1;
-        else if (size > (long)sizeof(body) - 1 || zcut) cut = 1;
+        else if (!g_att_a && (size > (long)sizeof(body) - 1 || zcut)) cut = 1;   // (a line range / function is whole: size is the file's)
         if (n > 0 && body[n - 1] == '\n') n--;
         char marker[220] = "";
         if (cut && !g_att_a && strchr(name, ':') && strncmp(name, "web/", 4)) {   // tell the model the file goes on
