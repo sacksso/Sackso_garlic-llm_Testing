@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #define NAME_MAX_LEN 96
@@ -111,6 +112,137 @@ static int ends_ci(const char* s, const char* suf) {
 
 static int starts_with(const char* s, const char* p) { return !strncmp(s, p, strlen(p)); }
 
+// ---- friendlier names (phase 6) ----------------------------------------------------------------------------------
+static char last_zip[NAME_MAX_LEN];   // the zip used last: "@zip", "@repo" or "@:path" mean it
+
+static int lc(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+
+static int contains_ci(const char* s, const char* sub) {
+    int sl = (int)strlen(s), bl = (int)strlen(sub);
+    for (int i = 0; i + bl <= sl; i++) {
+        int j = 0;
+        while (j < bl && lc(s[i + j]) == lc(sub[j])) j++;
+        if (j == bl) return 1;
+    }
+    return 0;
+}
+
+static int prefix_ci(const char* s, const char* p) {
+    while (*p && lc(*s) == lc(*p)) s++, p++;
+    return *p == 0;
+}
+
+// Edit distance between two short names, case-insensitive (capped: strings longer than 95 are not compared).
+static int edit_dist(const char* a, const char* b) {
+    int la = (int)strlen(a), lb = (int)strlen(b);
+    if (la > 95 || lb > 95) return 99;
+    int prev[97], cur[97];
+    for (int j = 0; j <= lb; j++) prev[j] = j;
+    for (int i = 1; i <= la; i++) {
+        cur[0] = i;
+        for (int j = 1; j <= lb; j++) {
+            int c = prev[j - 1] + (lc(a[i - 1]) != lc(b[j - 1]));
+            if (prev[j] + 1 < c) c = prev[j] + 1;
+            if (cur[j - 1] + 1 < c) c = cur[j - 1] + 1;
+            cur[j] = c;
+        }
+        memcpy(prev, cur, sizeof(int) * (lb + 1));
+    }
+    return prev[lb];
+}
+
+static int file_exists(const char* name) {
+    char path[200];
+    snprintf(path, sizeof(path), FILES_DIR "/%s", name);
+    int f = open(path, O_RDONLY);
+    if (f < 0) return 0;
+    close(f);
+    return 1;
+}
+
+// Turns what the user typed before the ":" into a real file name of FILES_DIR. Returns 0 as typed, 1 changed
+// (how: 1 alias for the last/only zip, 2 unique prefix or substring, 3 one typo away), -1 nothing found.
+// sugg gets up to three close names for the "did you mean" note.
+static int resolve_base(char* base, char* sugg, int sugg_max) {
+    static char names[60][NAME_MAX_LEN];
+    sugg[0] = 0;
+    int n = list_files(names, 60);
+    int is_alias = base[0] == 0 || !strcasecmp(base, "zip") || !strcasecmp(base, "repo");
+    if (is_alias) {
+        if (last_zip[0] && file_exists(last_zip)) {
+            strcpy(base, last_zip);
+            return 1;
+        }
+        int hit = -1, cnt = 0;   // the only zip there is
+        for (int i = 0; i < n; i++)
+            if (strlen(names[i]) > 4 && !strcasecmp(names[i] + strlen(names[i]) - 4, ".zip") && !strchr(names[i], '/')) hit = i, cnt++;
+        if (cnt == 1) {
+            strcpy(base, names[hit]);
+            return 1;
+        }
+        snprintf(sugg, sugg_max, cnt ? "several zips, say which one" : "no zip in " FILES_DIR);
+        return -1;
+    }
+    if (file_exists(base)) return 0;
+    int hit = -1, cnt = 0;
+    for (int i = 0; i < n; i++)
+        if (prefix_ci(names[i], base)) hit = i, cnt++;
+    if (cnt == 0)
+        for (int i = 0; i < n; i++)
+            if (contains_ci(names[i], base)) hit = i, cnt++;
+    if (cnt == 1) {
+        strcpy(base, names[hit]);
+        return 2;
+    }
+    int best[3] = {-1, -1, -1}, bd[3] = {99, 99, 99};
+    int bl = (int)strlen(base);
+    for (int i = 0; i < n; i++) {
+        int d = edit_dist(base, names[i]);
+        for (int k = 0; k < 3; k++)
+            if (d < bd[k]) {
+                for (int m = 2; m > k; m--) bd[m] = bd[m - 1], best[m] = best[m - 1];
+                bd[k] = d, best[k] = i;
+                break;
+            }
+    }
+    if (best[0] >= 0 && bd[0] <= 2 && bd[0] * 4 <= bl && bd[1] > bd[0]) {   // one clear near miss: take it
+        strcpy(base, names[best[0]]);
+        return 3;
+    }
+    int o = 0;
+    for (int k = 0; k < 3; k++)
+        if (best[k] >= 0 && bd[k] <= bl / 2 + 2 && o < sugg_max - NAME_MAX_LEN) o += snprintf(sugg + o, sugg_max - o, "%s ", names[best[k]]);
+    return -1;
+}
+
+// "Key files" that follow the list of a whole zip, so the model sees the project's purpose and its build without
+// the user asking for each one: README (top level) and the first workflows. Appends to out (at o), returns the new o.
+static int zip_key_files(const char* path, const ZipEnt* ents, int n, int tl, char* out, int o, int max) {
+    static char tmp[3200];
+    int done_readme = 0, flows = 0;
+    for (int i = 0; i < n && o < max - 600; i++) {
+        const char* rel = ents[i].name + tl;
+        int is_readme = !done_readme && !strchr(rel, '/') && prefix_ci(rel, "readme") && !strcasecmp(rel, "readme.md");
+        int is_flow = flows < 2 && prefix_ci(rel, ".github/workflows/") && (ends_ci(rel, ".yml") || ends_ci(rel, ".yaml"));
+        if (!is_readme && !is_flow) continue;
+        int budget = 2000;
+        int cut = 0;
+        int r = zip_read(path, &ents[i], tmp, budget < (int)sizeof(tmp) ? budget : (int)sizeof(tmp) - 1, &cut);
+        if (r <= 0) continue;
+        int w = 0;
+        for (int k = 0; k < r; k++)
+            if (tmp[k] != 0 && tmp[k] != '\r') tmp[w++] = tmp[k];
+        tmp[w] = 0;
+        if (cut) w = cut_clean(tmp, w);
+        int need = w + (int)strlen(rel) + 40;
+        if (o + need >= max) break;
+        o += snprintf(out + o, max - o, "\n--- %s%s ---\n%s\n", rel, cut ? " (first part)" : "", tmp);
+        if (is_readme) done_readme = 1;
+        else flows++;
+    }
+    return o;
+}
+
 // @repo.zip (the file list), @repo.zip:dir/ or @repo.zip:*.yml (a part of the list), @repo.zip:path/file (one file),
 // and @doc.docx / .pptx / .xlsx / .odt / .ods / .odp (the text of the document).
 // Returns the text length, or -2 when name is a plain file (not one of these), -1 not found, -3 several files match
@@ -151,7 +283,7 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         }
         int o = snprintf(out, max, "%s: %d files%s%.*s\n", base, total, tl ? ", paths inside " : "", tl, ents[0].name);
         int shown = 0, hidden = 0;
-        int lim = sl ? max : (max < 6000 ? max : 6000);   // a whole-zip list stays short: the user narrows it with dir/
+        int lim = sl ? max : (max < 4500 ? max : 4500);   // a whole-zip list stays short: the user narrows it with dir/
         for (int i = 0; i < n; i++) {
             const char* nm = ents[i].name;
             const char* rel = nm + tl;
@@ -179,6 +311,7 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         if (hidden && o < max - 120) o += snprintf(out + o, max - o, "(+%d binary files not listed; @%.60s:*.bin etc. lists them)\n", hidden, base);
         if (n < total) *cut = 1;
         if (sl && shown == 0 && !hidden) return -1;
+        if (sl == 0) o = zip_key_files(path, ents, n, tl, out, o, max);   // README and workflows come along
         *size = o;
         return o;
     }
@@ -249,6 +382,38 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         asked++;
         static char body[20000];
         long size = 0;
+        char shown[NAME_MAX_LEN + 8];   // what the note and the header call it
+        strcpy(shown, name);
+        {   // phase 6: "@zip", "@:path", a name start, or a typo of a file name
+            char* colon = strchr(name, ':');
+            char base[NAME_MAX_LEN], rest[NAME_MAX_LEN];
+            int bl2 = colon ? (int)(colon - name) : (int)strlen(name);
+            memcpy(base, name, bl2);
+            base[bl2] = 0;
+            snprintf(rest, sizeof(rest), "%s", colon ? colon : "");
+            char sugg[300];
+            int how = resolve_base(base, sugg, sizeof(sugg));
+            if (how < 0) {
+                if (sugg[0]) {
+                    char m[360];
+                    snprintf(m, sizeof(m), "@%.80s: not found. Did you mean: %s. ", name, sugg);
+                    int ml = (int)strlen(note);
+                    snprintf(note + ml, note_max - ml > 0 ? note_max - ml : 0, "%s", m);
+                } else note_add(note, note_max, "@%s: not found. ", name, 0);
+                continue;
+            }
+            if (how > 0) {
+                if (how >= 2) {   // tell the user what it was taken for
+                    char m[240];
+                    snprintf(m, sizeof(m), "@%.70s = %.100s. ", name, base);
+                    int ml = (int)strlen(note);
+                    if (ml < note_max - 1) snprintf(note + ml, note_max - ml, "%s", m);
+                }
+                snprintf(name, sizeof(name), "%.*s%s", (int)sizeof(name) - 1 - (int)strlen(rest), base, rest);
+                snprintf(shown, sizeof(shown), "%s", name);
+            }
+            if (ends_ci(base, ".zip")) strcpy(last_zip, base);
+        }
         int zcut = 0;
         int n = read_special(name, body, sizeof(body), &size, &zcut);
         if (n == -2) n = read_file(name, body, sizeof(body), &size);

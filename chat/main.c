@@ -39,6 +39,7 @@
 #include "files.h"   // @name: text files from /data/garlic_files
 #include "outfiles.h"   // /save: the named code blocks of the last answer go to /data/garlic_files/out
 #include "webcmd.h"    // /red /gh /url /web: network commands (off by default), and what they fetched
+#include "ask.h"       // /ok: bring what the model asked for in its last answer (@zip:path, /gh, /url)
 
 #define ASSETS "/app0/assets"
 #define IM_START eng.im_start   // <|im_start|> / <|im_end|> of the loaded model (model.idx)
@@ -1260,7 +1261,45 @@ static int voice_to_text(uint32_t button, DrawUnder under, char* text, int max) 
 // A message the user wrote: @name words bring the files of /data/garlic_files along (files.h); a lone @ lists them.
 static void send_text(const char* text) {
     static char ctx[14000];   // (about 4-5K tokens at most: ids[] in start_turn holds 8192)
-    char note[400];
+    char note[1400];   // (the help text and a list of search results are longer than a line)
+    static char okmsg[700];   // phase 6: what /ok sends (the model's requests, as @files)
+    int ask_plain = ask_is_plain_yes(text);
+    if (ask_is_cmd(text) || ask_plain) {   // the model asked for files or pages in its last answer: bring them
+        int last = -1;
+        for (int i = n_msgs - 1; i >= 0 && last < 0; i--)
+            if (msgs[i].who == MSG_AI) last = i;
+        char want[420], webs[420];
+        int nreq = last >= 0 ? ask_collect(msgs[last].text, want, sizeof(want), webs, sizeof(webs)) : 0;
+        if (nreq == 0) {
+            if (!ask_plain) {   // (a plain "ok" with nothing asked is just a message)
+                Msg* nm = msg_new(MSG_NOTE);
+                static const char none[] = "The last answer asked for no files or pages (it names them as @zip:path).";
+                msg_append(nm, none, sizeof(none) - 1);
+                say("ask: nothing requested");
+                return;
+            }
+        } else {
+            for (char* l = webs; *l;) {   // network commands first (they only work with /red on)
+                char* e = strchr(l, '\n');
+                if (!e) break;
+                *e = 0;
+                Msg* nm = msg_new(MSG_NOTE);
+                static const char wait_msg[] = "Working on it... the screen waits until it answers (up to about 30 s).";
+                msg_append(nm, wait_msg, sizeof(wait_msg) - 1);
+                view.scroll = 0;
+                show_chat();
+                double tw = now();
+                webcmd_run(l, note, sizeof(note));
+                say("ask: %s -> %s (%.2f s)", l, note, now() - tw);
+                nm->len = 0;
+                msg_append(nm, note, strlen(note));
+                l = e + 1;
+            }
+            snprintf(okmsg, sizeof(okmsg), "Aqui esta lo que pediste. Continua con tu tarea. %s", want);
+            say("ask: %d requests: %s", nreq, want);
+            text = okmsg;
+        }
+    }
     if (outfiles_is_cmd(text)) {   // /save or /guardar: write the files of the newest answer; nothing goes to the model
         int last = -1;
         for (int i = n_msgs - 1; i >= 0 && last < 0; i--)
@@ -1274,10 +1313,18 @@ static void send_text(const char* text) {
     }
     if (webcmd_is_cmd(text)) {   // /red /gh /url /web /limpiar /ayuda: the result waits for the next message
         double t0 = now();
+        Msg* nm = msg_new(MSG_NOTE);
+        if (webcmd_is_fetch(text)) {   // the download blocks this thread: say so, and draw one frame first
+            static const char wait_msg[] = "Working on it... the screen waits until it answers (up to about 30 s).";
+            msg_append(nm, wait_msg, sizeof(wait_msg) - 1);
+            view.scroll = 0;
+            show_chat();
+        }
         webcmd_run(text, note, sizeof(note));
         say("web: %s (%.2f s)", note, now() - t0);
-        Msg* nm = msg_new(MSG_NOTE);
+        nm->len = 0;   // the "working" line becomes the result (the layout notices the new text)
         msg_append(nm, note, strlen(note));
+        view.scroll = 0;
         return;
     }
     int pl = webcmd_pending_len();   // text fetched earlier goes first, then the @files

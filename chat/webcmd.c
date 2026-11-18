@@ -17,6 +17,9 @@ static char page[64 * 1024 + 1];   // the downloaded body
 static char text[16000];           // the same as plain text
 static char pending[PENDING_MAX];
 static int pending_n;
+static char last_urls[8][300];     // the links of the last search, for /abrir N
+static char last_titles[8][90];
+static int last_n;
 
 static int enabled(void) {
     char c = '0';
@@ -47,7 +50,7 @@ static int lower_eq(const char* a, int al, const char* lit) {
 }
 
 // The command word of "/word args": returns its id (0 none) and points *args after it.
-enum { C_NONE, C_NET, C_GH, C_URL, C_WEB, C_CLEAR, C_HELP };
+enum { C_NONE, C_NET, C_GH, C_URL, C_WEB, C_CLEAR, C_HELP, C_OPEN, C_WIKI, C_STATUS, C_UNKNOWN };
 
 static int parse_cmd(const char* t, const char** args) {
     while (*t == ' ' || *t == '\n' || *t == '\t') t++;
@@ -59,11 +62,22 @@ static int parse_cmd(const char* t, const char** args) {
     while (*a == ' ' || *a == '\t') a++;
     *args = a;
     if (lower_eq(w, l, "red") || lower_eq(w, l, "net")) return C_NET;
-    if (lower_eq(w, l, "gh")) return C_GH;
-    if (lower_eq(w, l, "url")) return C_URL;
-    if (lower_eq(w, l, "web") || lower_eq(w, l, "buscar") || lower_eq(w, l, "search")) return C_WEB;
+    if (lower_eq(w, l, "gh") || lower_eq(w, l, "g")) return C_GH;
+    if (lower_eq(w, l, "url") || lower_eq(w, l, "u")) return C_URL;
+    if (lower_eq(w, l, "web") || lower_eq(w, l, "buscar") || lower_eq(w, l, "search") || lower_eq(w, l, "b")) return C_WEB;
+    if (lower_eq(w, l, "abrir") || lower_eq(w, l, "open") || lower_eq(w, l, "o")) return C_OPEN;
+    if (lower_eq(w, l, "wiki") || lower_eq(w, l, "w")) return C_WIKI;
+    if (lower_eq(w, l, "estado") || lower_eq(w, l, "status")) return C_STATUS;
     if (lower_eq(w, l, "limpiar") || lower_eq(w, l, "clear")) return C_CLEAR;
-    if (lower_eq(w, l, "ayuda") || lower_eq(w, l, "help")) return C_HELP;
+    if (lower_eq(w, l, "ayuda") || lower_eq(w, l, "help") || lower_eq(w, l, "?")) return C_HELP;
+    if (l >= 2 && l <= 12) {   // "/word" made only of letters is a mistyped command, not text for the model
+        int letters = 1;
+        for (int i = 0; i < l; i++) {
+            char c = w[i] | 32;
+            if (c < 'a' || c > 'z') letters = 0;
+        }
+        if (letters) return C_UNKNOWN;
+    }
     return C_NONE;
 }
 
@@ -73,6 +87,13 @@ int webcmd_is_cmd(const char* text_) {
 }
 
 int webcmd_pending_len(void) { return pending_n; }
+
+// 1 for the commands that go to the network (the screen shows a "working" line first).
+int webcmd_is_fetch(const char* text_) {
+    const char* a;
+    int c = parse_cmd(text_, &a);
+    return (c == C_GH || c == C_URL || c == C_WEB || c == C_OPEN || c == C_WIKI) && enabled();
+}
 
 int webcmd_take_pending(char* dst, int max) {
     int n = pending_n < max ? pending_n : max;
@@ -436,6 +457,10 @@ static int parse_ddg(const char* h, int n, char* out, int max) {
             if (sg && se) html_to_text(sg + 1, (int)(se - sg - 1), snippet, sizeof(snippet), 0);
         }
         if (link[0] && title[0]) {
+            if (count < 8) {
+                snprintf(last_urls[count], sizeof(last_urls[0]), "%s", link);
+                snprintf(last_titles[count], sizeof(last_titles[0]), "%s", title);
+            }
             int w = snprintf(out + o, max - o, "%d. %s\n   %s\n%s%s%s", ++count, title, link, snippet[0] ? "   " : "", snippet, snippet[0] ? "\n" : "");
             if (w < 0 || o + w >= max) {
                 out[o] = 0;
@@ -451,12 +476,13 @@ static int parse_ddg(const char* h, int n, char* out, int max) {
 
 static void cmd_web(const char* arg, char* note, int nm) {
     if (!*arg) {
-        snprintf(note, nm, "Usage: /web what to search");
+        snprintf(note, nm, "Usage: /web what to search   (then /abrir 2 reads result 2)");
         return;
     }
     char q[200], url[400];
     url_encode(arg, q, sizeof(q));
     snprintf(url, sizeof(url), "https://html.duckduckgo.com/html/?q=%s", q);
+    last_n = 0;
     int n = fetch(url, note, nm);
     if (n < 0) return;
     static char results[6000];
@@ -467,17 +493,114 @@ static void cmd_web(const char* arg, char* note, int nm) {
     if (c == 0) {   // the page changed or came back empty: keep the raw page to look at it, and queue its text
         char raw[96];
         save_copy("last-search-raw", "html", page, n, raw, sizeof(raw));
+        if (strstr(page, "anomaly") || strstr(page, "challenge") || strstr(page, "captcha")) {
+            snprintf(note, nm, "DuckDuckGo asked for a human check (too many searches?). Try again in a few minutes, or use /wiki words, or /url with a link.");
+            return;
+        }
         int tl = html_to_text(page, n, text, 3000, 0);
         add_pending(title, text);
         snprintf(note, nm, "Search: 0 results parsed (%d bytes came back; raw page in %s, text of it queued, %d chars)", n, raw, tl);
         return;
     }
+    last_n = c < 8 ? c : 8;
     char sl[80];
     snprintf(sl, sizeof(sl), "web %s", slug);
     slugify(sl, slug, sizeof(slug));
     save_copy(slug, "txt", results, (int)strlen(results), saved, sizeof(saved));
     int added = add_pending(title, results);
-    snprintf(note, nm, "Search: %d results queued (%d bytes) for your next message. Saved as %s. Use /url with a link to read a page.", c, added, saved);
+    int o = snprintf(note, nm, "Search: %d results queued (%d bytes) for your next message. /abrir N reads one:", c, added);
+    for (int i = 0; i < last_n && o < nm - 100; i++) o += snprintf(note + o, nm - o, "\n%d. %.80s", i + 1, last_titles[i]);
+}
+
+// ---- /abrir N: the Nth result of the last search --------------------------------------------------------------------
+
+static void cmd_open(const char* arg, char* note, int nm) {
+    int k = atoi(arg);
+    if (last_n == 0) {
+        snprintf(note, nm, "No search to open from. Use /web words first.");
+        return;
+    }
+    if (k < 1 || k > last_n) {
+        snprintf(note, nm, "Usage: /abrir N   (N from 1 to %d)", last_n);
+        return;
+    }
+    cmd_url(last_urls[k - 1], note, nm);
+}
+
+// ---- /wiki ---------------------------------------------------------------------------------------------------------
+
+// Copies the JSON string that starts right after the opening quote at p into out, undoing the escapes.
+static void json_string(const char* p, const char* end, char* out, int max) {
+    int o = 0;
+    while (p < end && *p != '"' && o < max - 5) {
+        if (*p != '\\') {
+            out[o++] = *p++;
+            continue;
+        }
+        p++;
+        if (p >= end) break;
+        char c = *p++;
+        if (c == 'n') out[o++] = '\n';
+        else if (c == 't') out[o++] = ' ';
+        else if (c == 'u' && p + 4 <= end) {
+            unsigned cp = 0;
+            for (int i = 0; i < 4; i++) cp = cp * 16 + (unsigned)(hexv(p[i]) < 0 ? 0 : hexv(p[i]));
+            p += 4;
+            if (cp >= 0xD800 && cp < 0xDC00 && p + 6 <= end && p[0] == '\\' && p[1] == 'u') {   // a surrogate pair
+                unsigned lo = 0;
+                for (int i = 0; i < 4; i++) lo = lo * 16 + (unsigned)(hexv(p[2 + i]) < 0 ? 0 : hexv(p[2 + i]));
+                p += 6;
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            }
+            if (cp < 0x80) out[o++] = (char)cp;
+            else if (cp < 0x800) out[o++] = (char)(0xC0 | cp >> 6), out[o++] = (char)(0x80 | (cp & 63));
+            else if (cp < 0x10000) out[o++] = (char)(0xE0 | cp >> 12), out[o++] = (char)(0x80 | ((cp >> 6) & 63)), out[o++] = (char)(0x80 | (cp & 63));
+            else out[o++] = (char)(0xF0 | cp >> 18), out[o++] = (char)(0x80 | ((cp >> 12) & 63)), out[o++] = (char)(0x80 | ((cp >> 6) & 63)), out[o++] = (char)(0x80 | (cp & 63));
+        } else out[o++] = c;   // \" \\ \/
+    }
+    out[o] = 0;
+}
+
+static void cmd_wiki(const char* arg, char* note, int nm) {
+    if (!*arg) {
+        snprintf(note, nm, "Usage: /wiki words   (Spanish Wikipedia; /wiki en:words for English)");
+        return;
+    }
+    char lang[8] = "es";
+    const char* term = arg;
+    int ll = 0;
+    while (ll < 4 && ((arg[ll] | 32) >= 'a' && (arg[ll] | 32) <= 'z')) ll++;
+    if (ll >= 2 && ll <= 3 && arg[ll] == ':') {
+        memcpy(lang, arg, ll);
+        lang[ll] = 0;
+        term = arg + ll + 1;
+        while (*term == ' ') term++;
+    }
+    if (!*term) {
+        snprintf(note, nm, "Usage: /wiki words");
+        return;
+    }
+    char q[200], url[500];
+    url_encode(term, q, sizeof(q));
+    snprintf(url, sizeof(url), "https://%s.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=%s&gsrlimit=1&prop=extracts&exintro=1&explaintext=1&redirects=1&format=json&formatversion=2&utf8=1", lang, q);
+    int n = fetch(url, note, nm);
+    if (n < 0) return;
+    const char* e = strstr(page, "\"extract\":\"");
+    const char* t = strstr(page, "\"title\":\"");
+    if (!e || !t) {
+        snprintf(note, nm, "Wikipedia (%s) has nothing for '%.60s'. Try /web.", lang, term);
+        return;
+    }
+    char wtitle[160];
+    json_string(t + 9, page + n, wtitle, sizeof(wtitle));
+    json_string(e + 11, page + n, text, sizeof(text));
+    char head[220], slug[64], saved[96], sl[200];
+    snprintf(head, sizeof(head), "Wikipedia (%s): %s", lang, wtitle);
+    snprintf(sl, sizeof(sl), "wiki %s %s", lang, term);
+    slugify(sl, slug, sizeof(slug));
+    save_copy(slug, "txt", text, (int)strlen(text), saved, sizeof(saved));
+    int added = add_pending(head, text);
+    snprintf(note, nm, "%s: %d chars, %d queued for your next message. Saved as %s. For the whole article use /web or /url.", head, (int)strlen(text), added, saved);
 }
 
 // ---- dispatch ------------------------------------------------------------------------------------------------------
@@ -494,7 +617,18 @@ int webcmd_run(const char* t, char* note, int nm) {
     argbuf[al] = 0;
     switch (cmd) {
     case C_HELP:
-        snprintf(note, nm, "Commands: /red on|off (network switch), /gh owner/repo [path], /url https://..., /web words, /limpiar, /guardar. Files: @name, @repo.zip, @repo.zip:path, @doc.docx|pptx|xlsx.");
+        snprintf(note, nm,
+                 "FILES\n@  list   |   @name   |   @repo.zip:path   |   @doc.docx\n/guardar  saves the files of the last answer\n"
+                 "INTERNET (/red on first)\n/web words   /abrir N   /wiki words\n/url https://...   /gh owner/repo [path]\n"
+                 "OTHER\n/estado  state   |   /limpiar  drop fetched text   |   /red on|off\n"
+                 "Short forms: /b /o /w /u /g");
+        break;
+    case C_STATUS:
+        snprintf(note, nm, "Network: %s   backend: %s\nWaiting for your next message: %d bytes of web text\nLast search: %d results%s",
+                 enabled() ? "ON" : "OFF", net_backend(), pending_n, last_n, last_n ? " (/abrir N)" : "");
+        break;
+    case C_UNKNOWN:
+        snprintf(note, nm, "Unknown command. Type /ayuda to see them.");
         break;
     case C_CLEAR:
         pending_n = 0;
@@ -503,17 +637,25 @@ int webcmd_run(const char* t, char* note, int nm) {
     case C_NET:
         if (!strcmp(argbuf, "on") || !strcmp(argbuf, "1") || !strcmp(argbuf, "si") || !strcmp(argbuf, "sí")) set_enabled(1);
         else if (!strcmp(argbuf, "off") || !strcmp(argbuf, "0") || !strcmp(argbuf, "no")) set_enabled(0);
-        snprintf(note, nm, "Network for the AI: %s (backend: %s). Only /gh, /url and /web use it, with what you type.", enabled() ? "ON" : "OFF", net_backend());
+        snprintf(note, nm, "Network for the AI: %s (backend: %s). Only /web, /wiki, /url, /abrir and /gh use it, with what you type.", enabled() ? "ON" : "OFF", net_backend());
         break;
     case C_GH:
     case C_URL:
     case C_WEB:
+    case C_OPEN:
+    case C_WIKI:
+        if (cmd == C_OPEN && last_n > 0 && !enabled()) {
+            snprintf(note, nm, "Network is OFF. Type /red on first.");
+            break;
+        }
         if (!enabled()) {
-            snprintf(note, nm, "Network is OFF. Type /red on to allow /gh, /url and /web.");
+            snprintf(note, nm, "Network is OFF. Type /red on to allow /web, /wiki, /url and /gh.");
             break;
         }
         if (cmd == C_GH) cmd_gh(argbuf, note, nm);
         else if (cmd == C_URL) cmd_url(argbuf, note, nm);
+        else if (cmd == C_OPEN) cmd_open(argbuf, note, nm);
+        else if (cmd == C_WIKI) cmd_wiki(argbuf, note, nm);
         else cmd_web(argbuf, note, nm);
         break;
     default:
