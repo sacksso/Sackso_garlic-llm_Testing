@@ -22,6 +22,15 @@ Se escriben como un mensaje normal en el chat (teclado de la app, USB o del sist
 |---|---|
 | `/ok` (o `ok`, `si`, `dale` justo después de una respuesta que pide cosas) | Si la última respuesta de la IA nombra archivos (`@repo.zip:ruta`) o comandos de red (`/gh`, `/url`, `/web`), la app los trae y se los manda a la IA en un solo mensaje. Sin `/ok` no se lee nada. |
 
+## Fase 12: comprobar y ver el impacto
+| Comando | Qué hace |
+|---|---|
+| `@zip!nombre` | Todos los sitios del repo que usan ese nombre (palabra entera), archivo por archivo y con la definición primero. Sirve para saber qué más hay que cambiar si cambias una función. |
+| `/verificar [archivo]` | Revisa un archivo (sin argumento: los que la IA escribió en esta sesión). Detecta: JSON mal formado; YAML con tabuladores, sangría que no cuadra, claves repetidas, `run: a: b` sin comillas; workflows sin `on`/`jobs`/`runs-on`, pasos sin `uses`/`run`, `uses:` sin `@versión`; Python con `def`/`if` sin `:`, bloque sin cuerpo, paréntesis o comillas sin cerrar; shell con `if` sin `fi`, bucles sin `done`; C con comentarios, comillas o `#if` sin cerrar; Markdown con ``` sin cerrar. |
+| (automático) | Con `/auto on`, tras cada edición o archivo nuevo el agente pasa esa misma revisión y, si el cambio dejó el archivo peor que antes, se lo dice al modelo para que corrija solo ese bloque. |
+
+El mapa (`@zip`) empieza ahora con una línea `Project:` (lenguajes, archivos de build, número de tests) y otra `CI:` (triggers, jobs y número de pasos de cada workflow). `/errores` reconoce también los errores de workflow (`Invalid workflow file: ….yml#L12`) y muestra ese trozo del archivo.
+
 ## Explorador de archivos
 Se abre con **F5**, **clic derecho** (sin respuesta en curso) o el comando `/archivos`. Muestra `/data/garlic_files/` (y `out/`, `web/`); entrando en un `.zip` se ven sus carpetas y archivos. Marca uno o varios (hasta 8) y pulsa **Adjuntar**: la app abre el teclado con `@archivo1 @archivo2` ya escrito para que añadas tu pregunta. Marcar un zip entero adjunta su mapa.
 | Con | Hace |
