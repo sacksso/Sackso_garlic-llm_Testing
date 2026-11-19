@@ -659,6 +659,7 @@ int webcmd_run(const char* t, char* note, int nm) {
                  "INTERNET (/red on first)\n/web words   /abrir N   /wiki words\n/url https://...   /gh owner/repo [path | zip]\n"
                  "PROJECT\n/proyecto zip   /mapa   /grep words   /aplicar   /empaquetar   /auto on|off [N]   /limite N\n"
                  "PROGRESS\n/progreso  the model writes its notes, saved   |   /retomar  fresh context from them\n"
+                 "API (phone, PC, games)\n/api  addresses   |   /api on|off   |   /cache on|off   |   /puerto N\n"
                  "OTHER\n/estado  state   |   /limpiar  drop fetched text   |   /red on|off\n"
                  "Short forms: /b /o /w /u /g");
         break;

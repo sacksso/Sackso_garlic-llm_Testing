@@ -320,6 +320,8 @@ static const char* toast_text;
 static int in_voice_mode;   // the voice mode screen is showing (its own thread draws it, see vs_main)
 static char api_chip[48];   // the API's label in the header while it is on ("" = off), see api_toggle
 static int api_busy;        // the model is answering an API request (api_run.inc)
+static int api_cache_on;    // "/cache on": api_run.inc keeps the state of the last prompt (see there)
+static void api_cache_drop(void);   // (api_run.inc) whatever uses the engine or the dictation memory calls it
 static void show_voice(int state);
 static void tts_new_reply(void);
 static void vs_publish(int think, int listen, float level);
@@ -556,6 +558,7 @@ static void think_toggle(void) {
 }
 
 static int think_save(void) {
+    api_cache_drop();   // (the state copy goes to the memory the prefix cache keeps its state in)
     uint64_t need = engine_state_size(&eng);
     if (!eng.asr.ws_end || eng.asr.ws_end - eng.asr.ws_begin < need) return 0;
     double t0 = now();
@@ -734,7 +737,7 @@ static void system_ahead(int tokens) {
     }
     if (sys_pre == 0) {
         sys_n = system_ids(sys_ids, 1536);
-        engine_reset(&eng);
+        engine_reset(&eng), api_cache_drop();
     }
     int k = sys_n - sys_pre < tokens ? sys_n - sys_pre : tokens;
     uint32_t next;
@@ -769,7 +772,7 @@ static void start_turn(const char* user_text) {
     think_t_ask = now();
     sys_pre = 0;   // (a system prompt half read ahead is read again below)
     if (pos == 0) {
-        engine_reset(&eng);   // a new conversation: clear the Gated DeltaNet states
+        engine_reset(&eng), api_cache_drop();   // a new conversation: clear the Gated DeltaNet states
         n = system_ids(ids, max);
     } else
     {
@@ -919,7 +922,7 @@ static void kv_case(int three) {
     n = encode_into(ids, n, max, "\n\n");
     ids[n++] = THINK_END;
     n = encode_into(ids, n, max, "\n\n");
-    engine_reset(&eng);
+    engine_reset(&eng), api_cache_drop();
     double t0 = now(), gpu = 0;
     uint32_t next = 0;
     for (int o = 0; o < n; o += 512) {
@@ -969,7 +972,7 @@ static void kv_case(int three) {
     dt = now() - t0;
     ans[al] = 0;
     say("kv test answer (%d tokens at position %d+, %.1f tokens/s): %s", steps, n, steps / (dt > 0 ? dt : 1), ans);
-    engine_reset(&eng);
+    engine_reset(&eng), api_cache_drop();
 }
 
 // Speed with a short context: a question, then 64 greedy tokens (the answer goes to the log).
@@ -986,7 +989,7 @@ static void speed_case(void) {
     n = encode_into(ids, n, 256, "\n\n");
     ids[n++] = THINK_END;
     n = encode_into(ids, n, 256, "\n\n");
-    engine_reset(&eng);
+    engine_reset(&eng), api_cache_drop();
     uint32_t next = 0;
     if (engine_run(&eng, ids, n, 0, 0.0f, 1, &next)) return;
     char ans[600];
@@ -1004,7 +1007,7 @@ static void speed_case(void) {
     ans[al] = 0;
     say("speed test (%s cache): %d tokens after a prompt of %d, %.1f tokens/s: %s", eng.tq ? "TurboQuant" : "fp16/int8",
         steps, n, steps / (dt > 0 ? dt : 1), ans);
-    engine_reset(&eng);
+    engine_reset(&eng), api_cache_drop();
 }
 
 
@@ -1302,6 +1305,7 @@ static int voice_to_text(uint32_t button, DrawUnder under, char* text, int max) 
         present();
     }
     double t1 = now();
+    api_cache_drop();   // (dictation works in the memory the prefix cache keeps its state in)
     int r = asr_transcribe(&eng, audio, n, text, max);
     free(audio);
     if (r) {
@@ -1324,6 +1328,74 @@ static int voice_to_text(uint32_t button, DrawUnder under, char* text, int max) 
 // ---- phase 8: progress kept outside the model's memory ----------------------------------------------------------
 
 static void send_text(const char* text);
+static void api_toggle(void);
+#define CACHE_FILE "/data/garlic_api_cache.txt"   // "1": the API's prefix cache is on
+
+// "/api [on|off]" (the addresses to type into a game or an app), "/cache on|off" (the prefix cache) and
+// "/puerto N" (the port, for a game that expects 5001 or 11434). Returns 1 when text was one of them.
+static int api_cmd(const char* text, char* note, int nm) {
+    while (*text == ' ') text++;
+    int which = 0;
+    const char* a = text;
+    if (!strncmp(text, "/api", 4) && (!text[4] || text[4] == ' ')) which = 1, a = text + 4;
+    else if (!strncmp(text, "/cache", 6) && (!text[6] || text[6] == ' ')) which = 2, a = text + 6;
+    else if (!strncmp(text, "/puerto", 7) && (!text[7] || text[7] == ' ')) which = 3, a = text + 7;
+    else if (!strncmp(text, "/port", 5) && (!text[5] || text[5] == ' ')) which = 3, a = text + 5;
+    else return 0;
+    while (*a == ' ') a++;
+    const int es = ui_lang == LANG_ES;
+    if (which == 1) {
+        if (!strncmp(a, "on", 2) && !api_enabled()) api_toggle();
+        else if (!strncmp(a, "off", 3) && api_enabled()) api_toggle();
+        if (!api_enabled()) {
+            snprintf(note, nm, es ? "API apagada. Enciéndela con /api on (o L3 en el mando). Puerto: %d (se cambia con /puerto N)."
+                                  : "API off. Turn it on with /api on (or L3 on the controller). Port: %d (change it with /puerto N).",
+                     api_port());
+            return 1;
+        }
+        const char* ad = api_address();
+        if (ad[0] == ':') {
+            snprintf(note, nm, es ? "API encendida en el puerto %d, pero la consola no conoce su dirección IP (¿sin red?)."
+                                  : "API on at port %d, but the console does not know its IP address (no network?).", api_port());
+            return 1;
+        }
+        snprintf(note, nm,
+                 es ? "API encendida: %s\nChat en el navegador (móvil/PC): http://%s/\nOpenAI (URL base): http://%s/v1\n"
+                      "Ollama: http://%s   |   KoboldCpp: http://%s\nCaché de prefijo: %s (/cache on|off)"
+                    : "API on: %s\nChat in the browser (phone/PC): http://%s/\nOpenAI (base URL): http://%s/v1\n"
+                      "Ollama: http://%s   |   KoboldCpp: http://%s\nPrefix cache: %s (/cache on|off)",
+                 ad, ad, ad, ad, ad, api_cache_on ? "ON" : "OFF");
+        return 1;
+    }
+    if (which == 2) {
+        if (!strncmp(a, "on", 2) || !strncmp(a, "off", 3)) {
+            api_cache_on = a[1] == 'n';
+            api_cache_drop();
+            int f = open(CACHE_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (f >= 0) write(f, api_cache_on ? "1" : "0", 1), close(f);
+            say("api: prefix cache %s", api_cache_on ? "on" : "off");
+        }
+        snprintf(note, nm,
+                 es ? "Caché de prefijo de la API: %s. Si una petición empieza igual que la anterior (el personaje, la historia), "
+                      "solo lee lo nuevo en vez de todo el prompt. /cache on | off"
+                    : "API prefix cache: %s. When a request starts like the last one (the character, the story so far) only what "
+                      "is new is read, not the whole prompt. /cache on | off",
+                 api_cache_on ? "ON" : "OFF");
+        return 1;
+    }
+    int p = atoi(a);
+    if (!*a) {
+        snprintf(note, nm, es ? "Puerto de la API: %d. Cambiar: /puerto N (1024-65535). Típicos: 8080, 5001 (KoboldCpp), 11434 (Ollama), 5000."
+                              : "API port: %d. Change: /puerto N (1024-65535). Usual ones: 8080, 5001 (KoboldCpp), 11434 (Ollama), 5000.",
+                 api_port());
+    } else if (api_set_port(p)) {
+        snprintf(note, nm, es ? "Puerto no válido: usa un número de 1024 a 65535." : "Not a usable port: use a number from 1024 to 65535.");
+    } else {
+        snprintf(note, nm, es ? "Puerto guardado: %d. Vale la próxima vez que enciendas la API (/api off y luego /api on)."
+                              : "Port saved: %d. It applies the next time the API is turned on (/api off, then /api on).", p);
+    }
+    return 1;
+}
 
 static void note_msg(const char* s) {
     Msg* m = msg_new(MSG_NOTE);
@@ -1467,6 +1539,12 @@ static void send_text(const char* text) {
         if (last < 0) snprintf(note, sizeof(note), "Nothing to save yet: there is no answer.");
         else outfiles_save(msgs[last].text, note, sizeof(note));
         say("save: %s", note);
+        Msg* nm = msg_new(MSG_NOTE);
+        msg_append(nm, note, strlen(note));
+        return;
+    }
+    if (api_cmd(text, note, sizeof(note))) {
+        say("api: %s", note);
         Msg* nm = msg_new(MSG_NOTE);
         msg_append(nm, note, strlen(note));
         return;
@@ -1916,6 +1994,7 @@ static void asr_wait(void) {
 }
 
 static void run_python(void) {
+    api_cache_drop();   // (a program may use the engine's memory)
     asr_wait();   // (a reload still running from the last program)
     asr_release(&eng);
     py_lent = (uint8_t*)asr_lent(&eng, &py_lent_size);
@@ -2201,6 +2280,10 @@ static void api_label(void) {
 }
 
 static void api_config(void) {
+    size_t csz = 0;
+    char* cf = (char*)read_all(CACHE_FILE, &csz);
+    api_cache_on = cf && csz && cf[0] == '1';
+    free(cf);
     size_t sz = 0;
     char* f = (char*)read_all(API_FILE, &sz);
     int on = f && sz && f[0] == '1';
@@ -2343,6 +2426,7 @@ int main(void) {
     view.temperature = devcmd_auto_on() || files_project()[0] || ws_name()[0] ? 0.3f : 0.7f;   // phase 8: code must be copied exactly: cooler by default (L2/R2)
     think_config();
     api_set_model(MODEL_NAME);
+    api_set_ctx((int)eng.ctx_limit);
     api_config();   // the OpenAI-compatible API (api.h), if it was left on; its jobs run in the loop below
 
     uint32_t prev = 0;

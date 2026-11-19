@@ -135,6 +135,9 @@ int api_http_parse(const char* buf, size_t len, HttpRequest* req) {
                 long cl = strtol(num, &ep, 10);
                 if (*ep || cl < 0 || cl > 1 << 20) return -1;
                 req->content_length = cl;
+            } else if (ci_eq(p, colon - p, "accept")) {   // (a browser asking for the page: it names text/html)
+                for (size_t i = 0; i + 9 <= vlen; i++)
+                    if (!memcmp(v + i, "text/html", 9)) req->wants_html = 1;
             } else if (ci_eq(p, colon - p, "authorization")) {
                 size_t k = vlen < sizeof(req->auth) - 1 ? vlen : sizeof(req->auth) - 1;
                 memcpy(req->auth, v, k);

@@ -26,6 +26,7 @@ typedef struct {
     char method[8];
     char path[256];
     char auth[256];             // the Authorization header's value ("" if none)
+    int wants_html;             // the Accept header names text/html (a browser)
     long content_length;        // 0 if none
     const char* body;           // points into the buffer given to api_http_parse
     size_t body_len;

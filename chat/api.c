@@ -8,16 +8,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <orbis/Net.h>
 #include <orbis/Sysmodule.h>
 #include <orbis/libkernel.h>
 
+#include "api_compat.h"
 #include "api_proto.h"
 #include "ui.h"
 
 #define API_ASSETS "/app0/assets"
 #define API_KEY_FILE "/data/garlic_api_key.txt"   // optional: if it holds a key, requests need "Authorization: Bearer <key>"
+#define API_PORT_FILE "/data/garlic_api_port.txt"   // optional: the port to listen on (a game may expect 5001 or 11434)
 #define API_MAX_BODY (1 << 20)
 
 // Socket constants that the SDK's headers do not name (the BSD values the console's libSceNet uses)
@@ -48,8 +51,43 @@ static OrbisNetId listen_fd = -1;   // the listening socket (changes under api_m
 static volatile int accepting;  // the server thread is waiting for a connection on it (in sceNetAccept)
 static char address[32];        // api_address()
 
+static int ctx_tokens = 16384;   // the context window, as the information endpoints report it
+static int port = API_PORT;      // the port in use (api_port): API_PORT_FILE, read each time the API is turned on
+
 void api_set_model(const char* name) {
     snprintf(model_name, sizeof(model_name), "%s", name);
+}
+
+void api_set_ctx(int tokens) {
+    if (tokens > 0) ctx_tokens = tokens;
+}
+
+int api_port(void) { return port; }
+
+// The port from API_PORT_FILE (1024..65535), else API_PORT.
+static void load_port(void) {
+    port = API_PORT;
+    size_t n = 0;
+    uint8_t* d = read_all(API_PORT_FILE, &n);
+    if (d) {
+        char b[16] = {0};
+        memcpy(b, d, n < 15 ? n : 15);
+        int p = atoi(b);
+        if (p >= 1024 && p <= 65535) port = p;
+        free(d);
+    }
+}
+
+// Saves the port for the next time the API is turned on. 0 = done, -1 = not a usable port or no file.
+int api_set_port(int p) {
+    if (p < 1024 || p > 65535) return -1;
+    char b[16];
+    int l = snprintf(b, sizeof(b), "%d\n", p);
+    int f = open(API_PORT_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (f < 0) return -1;
+    int w = (int)write(f, b, (size_t)l);
+    close(f);
+    return w == l ? 0 : -1;
 }
 
 const char* api_model(void) { return model_name; }
@@ -73,13 +111,18 @@ static void reply(int fd, int status, const char* reason, const char* ctype, con
     if (api_send(fd, head, h) == 0) api_send(fd, body, n);
 }
 
-static void reply_json_error(int fd, int status, const char* reason, const char* message, const char* type,
+static void reply_kind_error(int fd, int kind, int status, const char* reason, const char* message, const char* type,
                              const char* code) {
     Sb s;
     sb_init(&s);
-    api_json_error(&s, message, type, code);
+    api_out_http_error(kind, &s, message, type, code);
     reply(fd, status, reason, "application/json", s.p, s.n);
     sb_free(&s);
+}
+
+static void reply_json_error(int fd, int status, const char* reason, const char* message, const char* type,
+                             const char* code) {
+    reply_kind_error(fd, API_K_OPENAI_CHAT, status, reason, message, type, code);
 }
 
 ApiJob* api_take(void) {
@@ -133,15 +176,18 @@ static int read_request(int fd, char** buf_out, size_t* len_out, HttpRequest* re
     return r == 0 ? 0 : -1;
 }
 
-static void serve_chat(int fd, HttpRequest* req) {
+static void serve_gen(int fd, HttpRequest* req, int kind) {
     JNode* pool = malloc(sizeof(JNode) * API_MAX_NODES);
-    ChatRequest cr;
+    GenRequest g;
     const char* err = NULL;
-    if (!pool || api_chat_parse(req->body, req->body_len, pool, API_MAX_NODES, &cr, &err)) {
+    if (!pool || api_gen_parse(kind, req->body, req->body_len, pool, API_MAX_NODES, &g, &err)) {
+        if (pool) api_gen_free(&g);
         free(pool);
-        reply_json_error(fd, 400, "Bad Request", err ? err : "Out of memory.", "invalid_request_error", "invalid_body");
+        reply_kind_error(fd, kind, 400, "Bad Request", err ? err : "Out of memory.", "invalid_request_error", "invalid_body");
         return;
     }
+    int stream = g.stream;
+    api_gen_free(&g);
     free(pool);
     ApiJob* job = calloc(1, sizeof(ApiJob));
     char* body = malloc(req->body_len + 1);
@@ -154,6 +200,7 @@ static void serve_chat(int fd, HttpRequest* req) {
     memcpy(body, req->body, req->body_len);
     body[req->body_len] = 0;
     job->fd = fd;
+    job->kind = kind;
     job->body = body;
     job->body_len = req->body_len;
     scePthreadMutexLock(&api_mu);
@@ -166,11 +213,11 @@ static void serve_chat(int fd, HttpRequest* req) {
     if (full) {
         free(body);
         free(job);
-        reply_json_error(fd, 503, "Service Unavailable", "The model is busy with another request.", "server_error",
+        reply_kind_error(fd, kind, 503, "Service Unavailable", "The model is busy with another request.", "server_error",
                          "busy");
         return;
     }
-    say("api: chat request, %zu bytes, %s", req->body_len, cr.stream ? "streamed" : "whole reply");
+    say("api: request %s, %zu bytes, %s", req->path, req->body_len, stream ? "streamed" : "whole reply");
     // the main loop writes the reply to fd; the connection is closed here once it is written
     while (!job->done) sceKernelUsleep(5000);
     free(job->body);
@@ -191,34 +238,48 @@ static void handle(int fd) {
         reply_json_error(fd, 400, "Bad Request", "Malformed or incomplete request.", "invalid_request_error", NULL);
         return;
     }
+    int kind = api_kind_of(req.method, req.path);
+    const int is_get = !strcmp(req.method, "GET");
+    const int page = is_get && (!strcmp(req.path, "/index.html") || !strcmp(req.path, "/chat") ||
+                                (!strcmp(req.path, "/") && req.wants_html));
     if (!strcmp(req.method, "OPTIONS")) {
         const char* h = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
                         "Access-Control-Allow-Headers: Authorization, Content-Type\r\n"
                         "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         api_send(fd, h, strlen(h));
+    } else if (page) {   // the chat page: no key needed to load it (it asks for the key itself)
+        size_t n = 0;
+        uint8_t* html = read_all(API_ASSETS "/index.html", &n);
+        if (html) reply(fd, 200, "OK", "text/html; charset=utf-8", (const char*)html, n);
+        else reply_json_error(fd, 404, "Not Found", "The chat page is missing.", "invalid_request_error", NULL);
+        free(html);
+    } else if (is_get && !strcmp(req.path, "/health")) {
+        reply(fd, 200, "OK", "application/json", "{\"status\":\"ok\"}", 15);
     } else if (!authorized(&req)) {
-        reply_json_error(fd, 401, "Unauthorized", "Missing or wrong API key.", "invalid_request_error",
-                         "invalid_api_key");
-    } else if (!strcmp(req.method, "GET") && (!strcmp(req.path, "/v1/models") || !strcmp(req.path, "/models"))) {
+        reply_kind_error(fd, kind >= 0 ? kind : API_K_OPENAI_CHAT, 401, "Unauthorized", "Missing or wrong API key.",
+                         "invalid_request_error", "invalid_api_key");
+    } else if (is_get && (!strcmp(req.path, "/v1/models") || !strcmp(req.path, "/models"))) {
         Sb s;
         sb_init(&s);
         api_json_models(&s, model_name, 0);
         reply(fd, 200, "OK", "application/json", s.p, s.n);
         sb_free(&s);
-    } else if (!strcmp(req.method, "GET") && !strcmp(req.path, "/health")) {
-        reply(fd, 200, "OK", "application/json", "{\"status\":\"ok\"}", 15);
-    } else if (!strcmp(req.method, "GET") && (!strcmp(req.path, "/openapi.json") || !strcmp(req.path, "/"))) {
+    } else if (is_get && (!strcmp(req.path, "/openapi.json") || !strcmp(req.path, "/"))) {
         size_t n = 0;
         uint8_t* spec = read_all(API_ASSETS "/openapi.json", &n);
         if (spec) reply(fd, 200, "OK", "application/json", (const char*)spec, n);
         else reply_json_error(fd, 404, "Not Found", "The API description is missing.", "invalid_request_error", NULL);
         free(spec);
-    } else if (!strcmp(req.method, "POST") && !strcmp(req.path, "/v1/chat/completions")) {
-        serve_chat(fd, &req);
+    } else if (kind >= 0) {
+        serve_gen(fd, &req, kind);
         free(buf);
-        return;   // (serve_chat keeps the connection until the main loop has written the reply)
+        return;   // (serve_gen keeps the connection until the main loop has written the reply)
     } else {
-        reply_json_error(fd, 404, "Not Found", "No such endpoint.", "invalid_request_error", NULL);
+        Sb s;
+        sb_init(&s);
+        if (api_info(req.path, model_name, ctx_tokens, &s) && s.p) reply(fd, 200, "OK", "application/json", s.p, s.n);   // (Kobold and Ollama's small endpoints)
+        else reply_json_error(fd, 404, "Not Found", "No such endpoint.", "invalid_request_error", NULL);
+        sb_free(&s);
     }
     free(buf);
 }
@@ -304,10 +365,10 @@ static OrbisNetId api_listen(void) {
     memset(&a, 0, sizeof(a));
     a.len = sizeof(a);
     a.family = ORBIS_NET_AF_INET;
-    a.port = sceNetHtons(API_PORT);
+    a.port = sceNetHtons((uint16_t)port);
     a.addr = 0;   // any address
     if (sceNetBind(s, (const OrbisNetSockaddr*)&a, sizeof(a)) || sceNetListen(s, 4)) {
-        say("api: cannot listen on port %d; the API stays off", API_PORT);
+        say("api: cannot listen on port %d; the API stays off", port);
         sceNetSocketClose(s);
         return -1;
     }
@@ -318,7 +379,7 @@ static OrbisNetId api_listen(void) {
 // network. Connecting a UDP socket only makes the system choose that address; nothing is sent. Without a network
 // the address stays ":8080".
 static void find_address(void) {
-    snprintf(address, sizeof(address), ":%d", API_PORT);
+    snprintf(address, sizeof(address), ":%d", port);
     OrbisNetId s = sceNetSocket("garlic_api_addr", ORBIS_NET_AF_INET, ORBIS_NET_SOCK_DGRAM, API_IPPROTO_UDP);
     if (s < 0) return;
     static const uint8_t far[4] = {192, 0, 2, 1};   // (an address reserved for documentation: never a real host)
@@ -332,7 +393,7 @@ static void find_address(void) {
     if (sceNetConnect(s, (const OrbisNetSockaddr*)&a, sizeof(a)) == 0 &&
         sceNetGetsockname(s, (OrbisNetSockaddr*)&a, &len) == 0 && a.addr) {
         const uint8_t* b = (const uint8_t*)&a.addr;   // (network byte order: the bytes as they are written)
-        snprintf(address, sizeof(address), "%u.%u.%u.%u:%d", b[0], b[1], b[2], b[3], API_PORT);
+        snprintf(address, sizeof(address), "%u.%u.%u.%u:%d", b[0], b[1], b[2], b[3], port);
     }
     sceNetSocketClose(s);
 }
@@ -357,6 +418,7 @@ int api_enable(int want) {
     }
     if (on) return 0;
     if (api_setup()) return -1;
+    load_port();
     scePthreadMutexLock(&api_mu);
     int l = listen_fd;   // (still open only if the server thread has been waiting on it since the API went off)
     if (l < 0) l = listen_fd = api_listen();
