@@ -10,6 +10,7 @@
 #include <time.h>
 
 #include "api.h"
+#include "api_compat.h"
 #include "api_proto.h"
 
 // ---- mock model and tokenizer ----------------------------------------------------------------------------------------
@@ -23,8 +24,12 @@ typedef struct {
     int qwen35, ctx_limit;
     uint32_t eos, eos2;
     char error[160];
+    struct {
+        uint64_t ws_begin, ws_end;   // the dictation work memory (the prefix cache keeps the saved state there)
+    } asr;
 } MockEngine;
-static MockEngine eng = {1, 4096, 1005, EOS2, ""};
+static MockEngine eng = {1, 4096, 1005, EOS2, "", {0x1000, 0x1000 + 4096}};
+static int api_cache_on;
 typedef struct {
     int dummy;
 } Tokenizer;
@@ -40,7 +45,6 @@ static int fail_engine_at = -1;   // the engine fails on this call (-1: never)
 #define GARLIC_SPEC 1             // (as the 9B app: api_run.inc asks spec_active before every step)
 static int spec_on;               // the mock MTP head is on: a step keeps up to spec_keep tokens of its draft
 static int spec_keep = 2;
-static int next_pos, pos_errors;  // where the next token must go; steps given another position
 static int fed;                   // tokens of the reply fed to the model
 // what main.c shows of a job: begun and ended (they must pair), and Circle held from stop_at tokens on (-1: never)
 static int chat_begun, chat_ended, chat_replies, stop_at = -1;
@@ -76,7 +80,29 @@ static void api_chat_end(void) { chat_ended++; }
 static int tok_encode(const Tokenizer* t, const char* s, uint32_t* out, int max);
 // as main.c
 static int encode_into(uint32_t* ids, int n, int max, const char* text) { return n + tok_encode(&tok, text, ids + n, max - n); }
-static void engine_reset(MockEngine* e) { (void)e; }
+static int next_pos, pos_errors;  // where the next token must go; steps given another position
+static int reset_calls, read_total, saved_pos, save_calls, restore_calls, fail_restore;
+static void engine_reset(MockEngine* e) {
+    (void)e;
+    next_pos = 0;
+    reset_calls++;
+}
+static uint64_t engine_state_size(const MockEngine* e) {
+    (void)e;
+    return 1000;
+}
+static int engine_state_copy(MockEngine* e, uint64_t buf, int save) {
+    (void)buf;
+    if (save) saved_pos = next_pos, save_calls++, script_k > 0 ? script_k-- : 0;   // (the token drawn after the history is thrown away)
+    else {
+        if (fail_restore) {
+            snprintf(e->error, sizeof(e->error), "mock copy fault");
+            return -1;
+        }
+        next_pos = saved_pos, restore_calls++;
+    }
+    return 0;
+}
 
 // one byte per token (id = byte + 1), so prompts are easy to count
 static int tok_encode(const Tokenizer* t, const char* s, uint32_t* out, int max) {
@@ -115,7 +141,7 @@ static int engine_run(MockEngine* e, const uint32_t* tokens, int n, int pos0, fl
         snprintf(e->error, sizeof(e->error), "mock GPU fault");
         return -1;
     }
-    if (n > 1) prompt_len_seen = n, next_pos = 0;   // the prompt (fed in one go, from position 0)
+    if (n > 1) read_total += n, prompt_len_seen = n;   // the prompt (fed in one go, or its two parts with the cache)
     else fed++;
     if (pos0 != next_pos) pos_errors++;
     next_pos += n;
@@ -164,7 +190,10 @@ static int fails, checks;
         }                                                                     \
     } while (0)
 
+static int job_kind;   // API_K_*, 0 = OpenAI chat
+
 static void run_job(const char* body, const uint32_t* sc, int sc_len) {
+    read_total = reset_calls = save_calls = restore_calls = 0;
     memset(wire, 0, sizeof(wire));
     wire_n = 0;
     script = sc;
@@ -174,6 +203,7 @@ static void run_job(const char* body, const uint32_t* sc, int sc_len) {
     fed = 0;
     ApiJob job;
     memset(&job, 0, sizeof(job));
+    job.kind = job_kind;
     job.body = (char*)body;
     job.body_len = strlen(body);
     job.fd = 7;
@@ -323,6 +353,152 @@ static void test_stop(void) {
     CHECK(pos == 0);
 }
 
+
+// ---- the other protocols --------------------------------------------------------------------------------------------
+
+static void script_of(const char* s, uint32_t* out, int* n) {
+    int k = 0;
+    for (const char* p = s; *p; p++) out[k++] = (uint8_t)*p + 1;
+    *n = k;
+}
+
+static void test_protocols(void) {
+    uint32_t sc[64];
+    int n;
+    // OpenAI text completions: the prompt is the model's text as it is
+    script_of("Hola", sc, &n);
+    job_kind = API_K_OPENAI_TEXT;
+    run_job("{\"prompt\":\"Once\",\"max_tokens\":10}", sc, n);
+    CHECK(strstr(wire, "\"object\":\"text_completion\"") != NULL && strstr(wire, "\"text\":\"Hola\"") != NULL);
+    CHECK(prompt_len_seen == 4);
+    // a ChatML prompt that ends where the assistant starts gets the empty thought block (17 = marker + "assistant\n" + 6)
+    run_job("{\"prompt\":\"<|im_start|>assistant\\n\",\"max_tokens\":10}", sc, n);
+    CHECK(prompt_len_seen == 17);
+    // markers inside the text are the template's tokens: <|im_start|>user\nhi<|im_end|> = 1 + 8 bytes... (1 + 5 + 2 + 1)
+    run_job("{\"prompt\":\"<|im_start|>user\\nhi<|im_end|>\",\"max_tokens\":10}", sc, n);
+    CHECK(prompt_len_seen == 9);
+    // KoboldCpp
+    script_of("ABC", sc, &n);
+    job_kind = API_K_KOBOLD;
+    run_job("{\"prompt\":\"x\",\"max_length\":5}", sc, n);
+    CHECK(strcmp(body_of(wire), "{\"results\":[{\"text\":\"ABC\"}]}") == 0);
+    job_kind = API_K_KOBOLD_STREAM;
+    run_job("{\"prompt\":\"x\",\"max_length\":5}", sc, n);
+    CHECK(strstr(wire, "text/event-stream") != NULL);
+    CHECK(strstr(wire, "event: message\ndata: {\"token\":\"A\",\"finish_reason\":null}\n\n") != NULL);
+    CHECK(strstr(wire, "{\"token\":\"\",\"finish_reason\":\"stop\"}") != NULL);
+    // Ollama chat: NDJSON by default, one object when stream is false
+    job_kind = API_K_OLLAMA_CHAT;
+    run_job("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", sc, n);
+    CHECK(strstr(wire, "application/x-ndjson") != NULL);
+    CHECK(strstr(wire, "\"message\":{\"role\":\"assistant\",\"content\":\"A\"},\"done\":false}\n") != NULL);
+    CHECK(strstr(wire, "\"done\":true") != NULL && strstr(wire, "\"eval_count\":3") != NULL);
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}", sc, n);
+    CHECK(strstr(wire, "Content-Type: application/json") != NULL && strstr(wire, "\"content\":\"ABC\"") != NULL);
+    // Ollama generate: system + prompt as messages (11 + 10 + 17 tokens), and an error in Ollama's shape
+    job_kind = API_K_OLLAMA_GEN;
+    run_job("{\"prompt\":\"hi\",\"system\":\"s\",\"stream\":false}", sc, n);
+    CHECK(strstr(wire, "\"response\":\"ABC\"") != NULL && prompt_len_seen == 38);
+    run_job("{\"prompt\":\"\"}", sc, n);
+    CHECK(strncmp(wire, "HTTP/1.1 400", 12) == 0 && strstr(wire, "{\"error\":\"") != NULL);
+    // the other protocols take what fits of max_tokens; chat refuses
+    eng.ctx_limit = 100;
+    job_kind = API_K_KOBOLD;
+    run_job("{\"prompt\":\"x\",\"max_length\":500}", sc, n);
+    CHECK(strncmp(wire, "HTTP/1.1 200", 12) == 0);
+    job_kind = API_K_OPENAI_TEXT;
+    run_job("{\"prompt\":\"x\",\"max_tokens\":500}", sc, n);
+    CHECK(strncmp(wire, "HTTP/1.1 200", 12) == 0);
+    eng.ctx_limit = 4096;
+    job_kind = 0;
+}
+
+static void test_stop_sequences(void) {
+    uint32_t sc[64];
+    int n;
+    script_of("Hi\nYou: yo", sc, &n);
+    job_kind = API_K_KOBOLD;
+    run_job("{\"prompt\":\"x\",\"max_length\":50,\"stop_sequence\":[\"\\nYou:\"]}", sc, n);
+    CHECK(strcmp(body_of(wire), "{\"results\":[{\"text\":\"Hi\"}]}") == 0);
+    job_kind = API_K_KOBOLD_STREAM;
+    run_job("{\"prompt\":\"x\",\"max_length\":50,\"stop_sequence\":[\"\\nYou:\"]}", sc, n);
+    CHECK(strstr(wire, "You") == NULL && strstr(wire, "yo") == NULL);   // none of the stop text leaves the console
+    CHECK(strstr(wire, "\"token\":\"H\"") != NULL && strstr(wire, "\"token\":\"i\"") != NULL);
+    CHECK(strstr(wire, "\"finish_reason\":\"stop\"") != NULL);
+    // a half-written stop sequence that never completes is sent in the end
+    script_of("abEN", sc, &n);
+    run_job("{\"prompt\":\"x\",\"stop_sequence\":[\"END\"]}", sc, n);
+    CHECK(strstr(wire, "\"token\":\"EN\"") != NULL);
+    // a stop in the middle of one speculative step's tokens
+    script_of("abEND", sc, &n);
+    run_job("{\"prompt\":\"x\",\"stop_sequence\":[\"END\"]}", sc, n);
+    CHECK(strstr(wire, "\"token\":\"E") == NULL);
+    // chat completions take "stop" too
+    job_kind = 0;
+    script_of("Hello.###more", sc, &n);
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stop\":\"###\"}", sc, n);
+    CHECK(strstr(wire, "\"content\":\"Hello.\"") != NULL && strstr(wire, "more") == NULL);
+    CHECK(strstr(wire, "\"finish_reason\":\"stop\"") != NULL);
+    CHECK(pos == 0);
+}
+
+// The prefix cache: what is read, what is restored, and when it must not be used.
+static void test_cache(void) {
+    uint32_t sc[16];
+    int n;
+    script_of("Hola", sc, &n);
+    job_kind = 0;
+    api_cache_on = 1;
+    api_cache_drop();
+    pos_errors = 0;
+    // A: user "hello": 13 + "assistant\n" opened (11) = 24 of history, then the 6-token thought block
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":10}", sc, n);
+    CHECK(read_total == 30 && save_calls == 1 && restore_calls == 0 && reset_calls == 1 && api_cache_n == 24);
+    // B: the conversation grew (the old answer and a new question): 24 tokens come from the saved state
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"},{\"role\":\"assistant\",\"content\":\"Hola\"},"
+            "{\"role\":\"user\",\"content\":\"mas\"}],\"max_tokens\":10}", sc, n);
+    CHECK(restore_calls == 1 && reset_calls == 0 && save_calls == 1);
+    CHECK(read_total == 58 - 24 && api_cache_n == 52);
+    CHECK(strstr(wire, "\"prompt_tokens\":58") != NULL && strstr(wire, "\"content\":\"Hola\"") != NULL);
+    // the same history with a new question at the end: the state of B (52) is not a prefix of this one: back to A's? no, A was replaced
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"other\"}],\"max_tokens\":10}", sc, n);
+    CHECK(restore_calls == 0 && reset_calls == 1);   // a different start: read it all
+    CHECK(read_total == 30);
+    // dropped (a chat turn, thinking or dictation used the engine or the memory): read it all
+    api_cache_drop();
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"other\"}],\"max_tokens\":10}", sc, n);
+    CHECK(restore_calls == 0 && reset_calls == 1 && read_total == 30 && api_cache_n == 24);
+    // the state cannot be put back: the whole prompt is read, and the answer is still right
+    fail_restore = 1;
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"other\"},{\"role\":\"assistant\",\"content\":\"Hola\"},"
+            "{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":10}", sc, n);
+    fail_restore = 0;
+    CHECK(reset_calls == 1 && strstr(wire, "\"content\":\"Hola\"") != NULL);
+    // off: nothing is saved or restored
+    api_cache_on = 0;
+    api_cache_drop();
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":10}", sc, n);
+    CHECK(save_calls == 0 && restore_calls == 0 && api_cache_n == 0 && read_total == 30);
+    // raw prompts (games that send the story so far): the state is at the end of the prompt
+    api_cache_on = 1;
+    job_kind = API_K_KOBOLD;
+    run_job("{\"prompt\":\"abc\",\"max_length\":4}", sc, n);
+    CHECK(read_total == 3 && save_calls == 1 && api_cache_n == 3);
+    run_job("{\"prompt\":\"abcdef\",\"max_length\":4}", sc, n);
+    CHECK(restore_calls == 1 && read_total == 3 && api_cache_n == 6);
+    // the very same prompt again: nothing new to read, so it is read again in full
+    run_job("{\"prompt\":\"abcdef\",\"max_length\":4}", sc, n);
+    CHECK(restore_calls == 0 && reset_calls == 1 && read_total == 6);
+    // a failed read leaves no saved state behind
+    fail_engine_at = 1;
+    run_job("{\"prompt\":\"zzz\",\"max_length\":4}", sc, n);
+    fail_engine_at = -1;
+    CHECK(api_cache_n == 0 && strncmp(wire, "HTTP/1.1 500", 12) == 0);
+    api_cache_on = 0;
+    job_kind = 0;
+    CHECK(pos_errors == 0);   // every read began where the state stood
+}
+
 static void test_utf8(void) {
     CHECK(api_utf8_whole((const uint8_t*)"\xc3", 1) == 0);
     CHECK(api_utf8_whole((const uint8_t*)"a\xc3", 2) == 1);
@@ -342,6 +518,9 @@ int main(void) {
         test_client_gone();
         test_spec();
         test_stop();
+        test_protocols();
+        test_stop_sequences();
+        test_cache();
         CHECK(pos_errors == 0);            // every token went in at the position after the one before
         CHECK(chat_begun == chat_ended);   // every request that took the screen gave it back
         CHECK(chat_replies <= chat_begun);

@@ -39,4 +39,8 @@ $W/filepick_test
 mkdir -p $W/d9/files $W/d9/ws
 cp $W/t.zip $W/d9/files/repo.zip
 gcc $FL -DFILES_DIR="\"$W/d9/files\"" -DDEV_FLAG_FILE="\"$W/d9/dev.txt\"" -DWS_ROOT="\"$W/d9/ws/projects\"" -DWS_OUT_ROOT="\"$W/d9/files/out\"" -DWS_STATE_FILE="\"$W/d9/ws/proyecto.txt\"" -DWS_LEGACY_PROGRESS="\"$W/d9/ws/progreso.txt\"" tests/dev9_test.c chat/devcmd.c chat/files.c chat/repomap.c chat/zipread.c chat/zipwrite.c chat/htmltext.c chat/progress.c chat/patch.c chat/ask.c chat/workspace.c chat/outfiles.c -o $W/dev9_test && $W/dev9_test
+# the API: protocols (Kobold, Ollama, OpenAI text), stop sequences, prefix cache
+gcc $FL tests/api_proto_test.c chat/api_proto.c -o $W/api_proto_test && $W/api_proto_test
+gcc $FL tests/api_compat_test.c chat/api_compat.c chat/api_proto.c -o $W/api_compat_test && $W/api_compat_test
+gcc $FL tests/api_run_test.c chat/api_proto.c chat/api_compat.c -o $W/api_run_test && $W/api_run_test
 rm -rf $W
