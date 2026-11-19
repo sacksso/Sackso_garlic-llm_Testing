@@ -76,6 +76,29 @@ int main(void) {
     CHECK(!strcmp(ws_name(), ""));
     cmd("/proyecto repo.zip", "");   // no project: a zip makes one named after it
     CHECK(!strcmp(ws_name(), "repo") && !strcmp(ws_base_zip(), "repo.zip"));
+
+    // phase 12: the agent checks what it wrote (YAML, workflows) and tells the model; /verificar shows it again
+    cmd("/proyecto nuevo chk", "");
+    cmd("/auto on 9", "");
+    const char* wf_bad = "Archivo: .github/workflows/ci.yml\n```yaml\nname: CI\non: push\njobs:\n  build:\n    steps:\n      - name: nothing\n      - run: make\n```\n";
+    r = devcmd_agent_step(wf_bad, 0, nx, sizeof(nx), nm, sizeof(nm));
+    CHECK(r == 1 && strstr(nx, "runs-on") != NULL && strstr(nx, "neither uses nor run") != NULL);
+    cmd("/verificar", "");
+    CHECK(strstr(note, "problem") != NULL && strstr(note, "runs-on") != NULL);
+    const char* wf_ok = "Archivo: .github/workflows/ci.yml\n```yaml\nname: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: make\n```\n";
+    r = devcmd_agent_step(wf_ok, 0, nx, sizeof(nx), nm, sizeof(nm));
+    CHECK(r == 0);
+    cmd("/verificar .github/workflows/ci.yml", "");
+    CHECK(strstr(note, "no problems") != NULL);
+    // an edit that breaks the file (a tab) is reported, one that does not is not
+    const char* e_bad = "Archivo: .github/workflows/ci.yml\n<<<<<<< BUSCAR\n      - run: make\n=======\n      - run: make\n\t  - run: test\n>>>>>>> REEMPLAZAR\n";
+    r = devcmd_agent_step(e_bad, 0, nx, sizeof(nx), nm, sizeof(nm));
+    CHECK(r == 1 && strstr(nx, "tab") != NULL);
+    const char* e_ok = "Archivo: .github/workflows/ci.yml\n<<<<<<< BUSCAR\n      - run: make\n=======\n      - run: make -j2\n>>>>>>> REEMPLAZAR\n";
+    cmd("/deshacer", "");
+    r = devcmd_agent_step(e_ok, 0, nx, sizeof(nx), nm, sizeof(nm));
+    CHECK(r == 0 && strstr(nm, "applied") != NULL);
+    cmd("/auto off", "");
     printf(bad ? "dev9_test: FAILED\n" : "dev9_test: ok\n");
     return bad;
 }

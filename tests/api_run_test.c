@@ -499,6 +499,36 @@ static void test_cache(void) {
     CHECK(pos_errors == 0);   // every read began where the state stood
 }
 
+// A game that asks two kinds of things with the same start (the character card): the state is kept at the shared start.
+static void test_cache_alternating(void) {
+    uint32_t sc[16];
+    int n;
+    script_of("ok", sc, &n);
+    job_kind = 0;
+    api_cache_on = 1;
+    api_cache_drop();
+    api_prev_n = 0;
+    const char* card = "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS";   // 60 bytes
+    char a[512], b[512];
+    snprintf(a, sizeof(a), "{\"messages\":[{\"role\":\"system\",\"content\":\"%s\"},{\"role\":\"user\",\"content\":\"aaaa\"}],\"max_tokens\":8}", card);
+    snprintf(b, sizeof(b), "{\"messages\":[{\"role\":\"system\",\"content\":\"%s\"},{\"role\":\"user\",\"content\":\"bbbbbbb\"}],\"max_tokens\":8}", card);
+    run_job(a, sc, n);   // the first: nothing to share yet
+    CHECK(restore_calls == 0 && api_cache_n > 76);
+    run_job(b, sc, n);   // starts like A for 76 tokens: A's state (kept at its end) is no use, so B reads it all...
+    CHECK(restore_calls == 0 && reset_calls == 1);
+    CHECK(api_cache_n == 76);   // ...but keeps the state at the shared start
+    CHECK(read_total == 102);   // B: 70 + 15 + 11 + 6 tokens, all read
+    run_job(a, sc, n);
+    CHECK(restore_calls == 1 && reset_calls == 0 && api_cache_n == 76);
+    CHECK(read_total == 99 - 76);   // A: only what comes after the shared start
+    run_job(b, sc, n);
+    CHECK(restore_calls == 1 && reset_calls == 0 && api_cache_n == 76);
+    CHECK(read_total == 102 - 76);
+    CHECK(strstr(wire, "\"content\":\"ok\"") != NULL && pos_errors == 0);
+    api_cache_on = 0;
+    api_cache_drop();
+}
+
 static void test_utf8(void) {
     CHECK(api_utf8_whole((const uint8_t*)"\xc3", 1) == 0);
     CHECK(api_utf8_whole((const uint8_t*)"a\xc3", 2) == 1);
@@ -521,6 +551,7 @@ int main(void) {
         test_protocols();
         test_stop_sequences();
         test_cache();
+        test_cache_alternating();
         CHECK(pos_errors == 0);            // every token went in at the position after the one before
         CHECK(chat_begun == chat_ended);   // every request that took the screen gave it back
         CHECK(chat_replies <= chat_begun);

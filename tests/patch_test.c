@@ -60,10 +60,20 @@ int main(void) {
     CHECK(apply1("x.c\n<<<<<<< BUSCAR\nx();\n=======\nz();\n>>>>>>> REEMPLAZAR\n", f, sizeof f, &how, hint) == -2);
     CHECK(!strcmp(f, "x();\ny();\nx();\n"));   // untouched
 
-    // not found, with a hint
+    // a long line with a mistyped character is found (phase 10: the model copies text almost, not exactly)
     strcpy(f, "alpha();\nbeta_call(1, 2);\ngamma();\n");
-    CHECK(apply1("x.c\n<<<<<<< BUSCAR\nbeta_call(1, 3);\n=======\nz();\n>>>>>>> REEMPLAZAR\n", f, sizeof f, &how, hint) == -1);
+    CHECK(apply1("x.c\n<<<<<<< BUSCAR\nbeta_call(1, 3);\n=======\nz();\n>>>>>>> REEMPLAZAR\n", f, sizeof f, &how, hint) == 0);
+    CHECK(!strcmp(f, "alpha();\nz();\ngamma();\n"));
+    CHECK(!strcmp(how, "typo"));
+    // a short line is not: a = 1 and a = 2 differ by meaning
+    strcpy(f, "int a = 1;\nint b = 2;\n");
+    CHECK(apply1("x.c\n<<<<<<< BUSCAR\nint a = 7;\n=======\nz();\n>>>>>>> REEMPLAZAR\n", f, sizeof f, &how, hint) == -1);
+    CHECK(!strcmp(f, "int a = 1;\nint b = 2;\n"));
+    // not found (too different to be a typo), with a hint: the closest text in the file
+    strcpy(f, "alpha();\nbeta_call(1, 2);\ngamma();\n");
+    CHECK(apply1("x.c\n<<<<<<< BUSCAR\nbeta_call(1, 3, 99);\n=======\nz();\n>>>>>>> REEMPLAZAR\n", f, sizeof f, &how, hint) == -1);
     CHECK(strstr(hint, "beta_call(1, 2)") != NULL);
+    CHECK(!strcmp(f, "alpha();\nbeta_call(1, 2);\ngamma();\n"));   // untouched
 
     // deleting lines
     strcpy(f, "a\nb\nc\n");

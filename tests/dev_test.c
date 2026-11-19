@@ -12,6 +12,15 @@ int main(int argc, char** argv) {
     int n = repomap_build(argv[1], out, 8000, &ns);
     CHECK(n > 0 && ns >= 2);
     CHECK(strstr(out, "send_text") != NULL);
+    CHECK(strstr(out, "Project:") != NULL && strstr(out, "C 100%") != NULL);   // phase 12: the kind of project on top
+    {
+        static char refs[4000];
+        int th = 0;
+        int rf = repo_refs(argv[1], "send_text", refs, sizeof(refs), &th);
+        CHECK(rf == 1 && th == 1 && strstr(refs, "(definition)") != NULL && strstr(refs, "chat/main.c") != NULL);
+        CHECK(repo_refs(argv[1], "no_such_name", refs, sizeof(refs), &th) == 0 && strstr(refs, "No file uses") != NULL);
+        CHECK(repo_refs(argv[1], "send", refs, sizeof(refs), &th) == 0);   // whole words only
+    }
     RepoSeenSet seen = {.n = 0};
     int f = repo_search(argv[1], "send_text", out, 8000, 3, &seen, NULL);
     CHECK(f >= 1 && strstr(out, "send_text") != NULL);
