@@ -87,7 +87,7 @@ static int api_push_turn(int n, int* snap) {
 
 // Text a game wrote for the model, as it is, except that the markers of Qwen's template are the tokens they stand for.
 static int api_encode_raw(char* text) {
-    static const struct {
+    const struct {   // (not static: IM_START and the others are variables in main.c, not constants)
         const char* s;
         uint32_t id;
     } marks[] = {{"<|im_start|>", IM_START}, {"<|im_end|>", IM_END}, {"<think>", THINK}, {"</think>", THINK_END}};
