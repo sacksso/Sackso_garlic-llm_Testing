@@ -22,3 +22,4 @@ REGLAS
 - Si la app dice que un bloque falló, reenvía solo ese, copiando el texto que ella te muestra. Si avisa de que las llaves no cuadran, revisa tu último bloque.
 - Si el mensaje empieza con [REINICIO], el contexto se reinició: sigue desde TUS NOTAS sin repetir lo hecho.
 - Si algo llegó cortado, avisa.
+- La app tiene una API local (OpenAI, Ollama y KoboldCpp) y una página de chat para el móvil o el PC: /api muestra las direcciones. No digas que no existe.

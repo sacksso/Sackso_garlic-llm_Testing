@@ -84,6 +84,16 @@ Certificados HTTPS: el backend intenta primero verificar el servidor; si el hand
 
 Lo que bajan `/gh`, `/url` y `/web` espera y viaja al modelo **con tu siguiente mensaje**. Una copia queda en `/data/garlic_files/web/` (se relee con `@web/nombre.txt`).
 
+## API para el móvil, el PC y los juegos
+| Comando | Qué hace |
+|---|---|
+| `/api` | Muestra las direcciones para otras apps (chat web, OpenAI, Ollama, KoboldCpp). |
+| `/api on` · `/api off` | Enciende o apaga la API (igual que L3). |
+| `/puerto N` | Cambia el puerto (8080 por defecto) para la próxima vez que se encienda. 5001 = KoboldCpp, 11434 = Ollama. |
+| `/cache on` · `/cache off` | Caché de prefijo: si una petición empieza como la anterior, solo se lee lo nuevo. Mucho más rápido en juegos. Apagada por defecto. |
+
+Guía completa y pruebas: `docs/RED_LOCAL.md`.
+
 ## Adjuntar archivos con @
 | Escribes | Resultado |
 |---|---|
