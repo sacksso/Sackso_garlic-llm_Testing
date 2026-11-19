@@ -771,3 +771,12 @@ int files_project_read(const char* spec, char* out, int max, int* len, char* rel
     snprintf(rel, rel_max, "%s", hit->name + repo_root_len(ents, n));
     return 1;
 }
+
+// phase 11: any file of FILES_DIR as typed (a start of the name, a typo) -> its real name. 1 = found.
+int files_resolve_any(const char* typed, char* name_out, int max) {
+    char base[NAME_MAX_LEN], sg[300];
+    snprintf(base, sizeof(base), "%s", typed ? typed : "");
+    if (resolve_base(base, sg, sizeof(sg)) < 0) return 0;
+    snprintf(name_out, max, "%s", base);
+    return 1;
+}

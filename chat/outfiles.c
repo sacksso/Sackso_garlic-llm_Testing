@@ -1,5 +1,6 @@
 // Saving files from a reply (see outfiles.h).
 #include "outfiles.h"
+#include "undo.h"
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -90,6 +91,7 @@ static int write_file(const char* rel, const char* data, int n) {
     mkdirs(rel);
     char path[220];
     snprintf(path, sizeof(path), "%s/%s", OUT_DIR, rel);
+    undo_record(path);   // phase 11: the old content is kept for /deshacer
     int f = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (f < 0) return -1;
     int done = 0;
@@ -268,7 +270,13 @@ static int save_impl(const char* reply, char* note, int note_max, int dry) {
     return written;
 }
 
-int outfiles_save(const char* reply, char* note, int note_max) { return save_impl(reply, note, note_max, 0); }
+int outfiles_save(const char* reply, char* note, int note_max) {
+    int own = !undo_active();   // (inside /aplicar the batch is already open)
+    if (own) undo_begin();
+    int r = save_impl(reply, note, note_max, 0);
+    if (own) undo_end();
+    return r;
+}
 
 int outfiles_count(const char* reply) {
     char note[400];

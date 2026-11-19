@@ -45,6 +45,8 @@ const char* files_project(void);
 
 // Resolves a typed zip name ("" = the last or only one, a start of the name, a typo) to a file of FILES_DIR.
 // 1 = ok (name_out), 0 = not found (sugg holds a reason or close names).
+// phase 11: like files_resolve_zip for any file (a log, a text)
+int files_resolve_any(const char* typed, char* name_out, int max);
 int files_resolve_zip(const char* typed, char* name_out, int max, char* sugg, int sugg_max);
 
 // Path inside the zip of what spec names (a path, a path without the repo folder, a unique file name).

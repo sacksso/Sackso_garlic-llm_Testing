@@ -9,6 +9,9 @@
 
 #include "ask.h"
 #include "bintools.h"
+#include "buildlog.h"
+#include "ghinfo.h"
+#include "undo.h"
 #include "files.h"
 #include "outfiles.h"
 #include "patch.h"
@@ -82,7 +85,7 @@ static int word_is(const char* t, int tl, const char* lit) {
 
 static const char* const NAMES[] = {"proyecto", "project", "mapa", "map", "grep", "grep", "aplicar", "apply",
                                     "empaquetar", "zip", "auto", "limite", "limit", "proyectos", "projects",
-                                    "instrucciones", "instructions", "poke", "parchear", NULL};
+                                    "instrucciones", "instructions", "poke", "parchear", "errores", "errors", "trucos", "cheats", "deshacer", "undo", NULL};
 
 // Which command (index into NAMES) and where its arguments start. -1 when text is none of them.
 static int parse(const char* text, const char** args) {
@@ -430,9 +433,11 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
     } else if (c <= 7) {   // /aplicar
         static char rep[3000];
         int ok = 0, bad = 0;
+        undo_begin();   // phase 11: /deshacer puts back what this changes
         int nb = last_ai && last_ai[0] ? apply_reply(last_ai, rep, sizeof(rep), &ok, &bad) : 0;
         char fnote[400] = "";
         int nf = last_ai && last_ai[0] ? outfiles_save(last_ai, fnote, sizeof(fnote)) : 0;
+        undo_end();
         if (nf > 0) {
             char lg[420];
             snprintf(lg, sizeof(lg), "GUARDADO %s\n", fnote);
@@ -509,6 +514,51 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
         snprintf(note, nm, "Instructions of %s saved (%d chars). They go with your next message; a new chat (Triangle) puts them in the system prompt.", ws_name(), (int)strlen(ins));
     } else if (c == 17 || c == 18) {   // /poke
         do_poke(args, note, nm);
+    } else if (c == 19 || c == 20) {   // /errores [log] [repo.zip]: the errors of a build log with the code around them
+        char tk[2][120];
+        int nt = 0;
+        for (const char* p = args; *p && nt < 2;) {
+            while (*p == ' ') p++;
+            int k = 0;
+            while (*p && *p != ' ' && k < 119) tk[nt][k++] = *p++;
+            if (k) tk[nt++][k] = 0;
+        }
+        char logname[96] = "", cand[400], zipname[96] = "";
+        if (nt >= 1) {
+            if (!files_resolve_any(tk[0], logname, sizeof(logname))) {
+                snprintf(note, nm, "No such file: %.60s. Put the build log (the build-log zip or a .txt) in /data/garlic_files.", tk[0]);
+                return 0;
+            }
+        } else if (!buildlog_pick(logname, sizeof(logname), cand, sizeof(cand))) {
+            snprintf(note, nm, "No build log found. Put the build-log zip (or a .txt) of the Actions run in /data/garlic_files, or name it: /errores NAME [repo.zip].");
+            return 0;
+        }
+        if (nt >= 2) {
+            if (!files_resolve_zip(tk[1], zipname, sizeof(zipname), cand, sizeof(cand))) {
+                snprintf(note, nm, "No such repo zip: %.60s", tk[1]);
+                return 0;
+            }
+        } else if (strcmp(files_project(), logname)) snprintf(zipname, sizeof(zipname), "%s", files_project());
+        char lp[220], zp[220];
+        snprintf(lp, sizeof(lp), FILES_DIR "/%s", logname);
+        snprintf(zp, sizeof(zp), FILES_DIR "/%s", zipname);
+        static char rep[PEND_MAX - 200];
+        int n = buildlog_report(lp, zipname[0] ? zp : NULL, rep, 9000);
+        if (n < 0) snprintf(note, nm, "Cannot read %s.", logname);
+        else {
+            pend("[Build errors]", rep, n);
+            snprintf(note, nm, "%s: %d bytes of errors%s go with your next message (ask the AI to fix them; /aplicar applies its edits).", logname, n, zipname[0] ? " with the code around them" : " (no repo zip: name it as /errores log repo.zip to add the code)");
+        }
+    } else if (c == 21 || c == 22) {   // /trucos TITLEID: GoldHEN cheats and patches of a game
+        static char gi[4000];
+        int n = gh_game_info(args, gi, sizeof(gi));
+        if (n < 0) snprintf(note, nm, "Usage: /trucos CUSA06548 (the game's title id). Lists its GoldHEN cheats and patches.");
+        else {
+            pend("[GoldHEN]", gi, n);
+            snprintf(note, nm, "%.1200s(This list also goes with your next message.)", gi);
+        }
+    } else if (c == 23 || c == 24) {   // /deshacer
+        undo_last(note, nm);
     } else {   // /limite
         if (args[0]) {
             g_limit = atoi(args);
@@ -539,6 +589,7 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
         static char rep[3000];
         int ok = 0, bad = 0;
         rep[0] = 0;
+        undo_begin();   // phase 11
         if (has_patch) apply_reply(reply, rep, sizeof(rep), &ok, &bad);
         else g_warn[0] = 0, g_warn_n = 0;
         int nf = 0;
@@ -551,6 +602,7 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
                 log_change(lg);
             }
         }
+        undo_end();
         g_round_now++;
         char fpart[80] = "";
         if (nf > 0) snprintf(fpart, sizeof(fpart), ", %d file(s) saved", nf);
@@ -624,6 +676,7 @@ const char* devcmd_system_prompt(void) {
            "- Si la app dice que un bloque falló, reenvía solo ese, copiando el texto que ella te muestra. Si avisa de que las llaves no cuadran, revisa tu último bloque.\n"
            "- Si el mensaje empieza con [REINICIO], el contexto se reinició: sigue desde TUS NOTAS sin repetir lo hecho.\n"
            "- Si algo llegó cortado, avisa.\n"
+           "- Si el usuario habla de un fallo al compilar y no tienes el log, dile que escriba /errores: la app te manda cada error con el código de alrededor. Si un cambio salió mal, /deshacer lo revierte. Antes de editar una partida, que mire /trucos CUSAxxxxx (trucos y parches de GoldHEN del juego).\n"
            "\n"
            "PARTIDAS GUARDADAS Y ARCHIVOS BINARIOS (no son texto: no inventes su contenido)\n"
            "- No lees bytes ni calculas: la app lo hace. @zip lista todo el zip; @zip:archivo da un informe; @zip:archivo:0x100-0x1ff, el hex de un rango con su valor como número; @zip?=12500, dónde está ese número en todos los archivos; @antes.zip~despues.zip, qué bytes cambiaron.\n"
