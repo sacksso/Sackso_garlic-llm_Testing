@@ -7,7 +7,7 @@
 static int lc(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 
 static int name_char(unsigned char c) {   // the same set files.c accepts after an @
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+' || c == '=' || c == '~';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+' || c == '=' || c == '~' || c == '!';
 }
 
 static const char* trim(const char* s) {
@@ -84,9 +84,9 @@ int ask_collect(const char* reply, char* files, int files_max, char* webs, int w
         while (l < 95 && name_char((unsigned char)p[1 + l])) l++;
         memcpy(tok, p + 1, l);
         tok[l] = 0;
-        while (l > 0 && (tok[l - 1] == '.' || tok[l - 1] == ':' || tok[l - 1] == '-' || tok[l - 1] == '?' || tok[l - 1] == '+' || tok[l - 1] == '#')) tok[--l] = 0;   // sentence punctuation
+        while (l > 0 && (tok[l - 1] == '.' || tok[l - 1] == ':' || tok[l - 1] == '-' || tok[l - 1] == '?' || tok[l - 1] == '+' || tok[l - 1] == '#' || tok[l - 1] == '!')) tok[--l] = 0;   // sentence punctuation
         // a file ("name.ext"), or the zip alias with a request: "@zip:path", "@zip?words", "@repo#..." (not @Override, @param, emails...)
-        int alias = (!strncmp(tok, "zip", 3) || !strncmp(tok, "repo", 4)) && (strchr(tok, ':') || strchr(tok, '?'));
+        int alias = (!strncmp(tok, "zip", 3) || !strncmp(tok, "repo", 4)) && (strchr(tok, ':') || strchr(tok, '?') || strchr(tok, '!'));
         if (l < 3 || placeholder(tok) || (!strchr(tok, '.') && !alias) || strstr(tok, "..") || tok[0] == '/' || tok[0] == '*') continue;
         char item[104];
         int il = snprintf(item, sizeof(item), "@%s ", tok);

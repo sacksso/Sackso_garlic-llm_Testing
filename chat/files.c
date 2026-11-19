@@ -15,7 +15,7 @@
 #define NAME_MAX_LEN 96
 
 static int ok_name_char(unsigned char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+' || c == '=' || c == '~';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+' || c == '=' || c == '~' || c == '!';
 }
 
 static int cmp(const void* a, const void* b) { return strcmp((const char*)a, (const char*)b); }
@@ -272,7 +272,7 @@ static const char* num_at(const char* q, long* v) {
 static int read_special(const char* name, char* out, int max, long* size, int* cut) {
     {   // phase 10: @before.zip~after.zip = which bytes changed between two saves
         const char* tl = strchr(name, '~');
-        if (tl && !strchr(name, ':') && !strchr(name, '?')) {
+        if (tl && !strchr(name, ':') && !strchr(name, '?') && !strchr(name, '!')) {
             char pa[200], pb[200];
             snprintf(pa, sizeof(pa), FILES_DIR "/%.*s", (int)(tl - name), name);
             snprintf(pb, sizeof(pb), FILES_DIR "/%s", tl + 1);
@@ -284,13 +284,14 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         }
     }
     char base[NAME_MAX_LEN];
-    const char* colon = strpbrk(name, ":?");
+    const char* colon = strpbrk(name, ":?!");
     int bl = colon ? (int)(colon - name) : (int)strlen(name);
     if (bl <= 0 || bl >= NAME_MAX_LEN) return -2;
     memcpy(base, name, bl);
     base[bl] = 0;
     const char* spec = colon ? colon + 1 : NULL;
     int is_query = colon && *colon == '?';
+    int is_bang = colon && *colon == '!';   // phase 12: @repo.zip!name = every place that uses name
     int is_zip = ends_ci(base, ".zip");
     int is_office = ends_ci(base, ".docx") || ends_ci(base, ".pptx") || ends_ci(base, ".xlsx") || ends_ci(base, ".odt") ||
                     ends_ci(base, ".ods") || ends_ci(base, ".odp");
@@ -310,6 +311,13 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
     if (n < 0) return -5;
     int sl = spec ? (int)strlen(spec) : 0;
     g_last_rel[0] = 0;
+    if (is_bang) {
+        int th = 0;
+        int r = repo_refs(path, spec, out, max < 9000 ? max : 9000, &th);
+        if (r < 0) return -5;
+        *size = (long)strlen(out);
+        return (int)*size;
+    }
     if (is_query && spec[0] == '=') {   // phase 10: @save.zip?=12500 = where that number is stored, in every file
         int r = bin_zip_find(path, NULL, spec + 1, out, max);
         if (r == -2) r = snprintf(out, max, "\"%s\" is not a number (use 12500, -3, 0x1F4 or 12.5).\n", spec + 1);
@@ -549,7 +557,7 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         while (l < NAME_MAX_LEN - 1 && ok_name_char((unsigned char)p[1 + l])) l++;
         memcpy(name, p + 1, l);
         name[l] = 0;
-        while (l > 0 && (name[l - 1] == '?' || name[l - 1] == '+' || name[l - 1] == '#')) name[--l] = 0;   // "@zip?" at the end of a sentence
+        while (l > 0 && (name[l - 1] == '?' || name[l - 1] == '+' || name[l - 1] == '#' || name[l - 1] == '!')) name[--l] = 0;   // "@zip?" at the end of a sentence
         if (l == 0 || strstr(name, "..") || strstr(name, "//") || name[0] == '/' || (name[l - 1] == '/' && !strchr(name, ':'))) continue;
         int dup = 0;
         for (int i = 0; i < asked && i < 8; i++)
@@ -576,7 +584,7 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
             strcpy(last_zip, zb);
         } else
         {   // phase 6: "@zip", "@:path", a name start, or a typo of a file name
-            char* colon = strpbrk(name, ":?");
+            char* colon = strpbrk(name, ":?!");
             char base[NAME_MAX_LEN], rest[NAME_MAX_LEN];
             int bl2 = colon ? (int)(colon - name) : (int)strlen(name);
             memcpy(base, name, bl2);

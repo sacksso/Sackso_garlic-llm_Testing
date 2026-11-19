@@ -12,6 +12,7 @@
 #include "buildlog.h"
 #include "ghinfo.h"
 #include "undo.h"
+#include "verify.h"
 #include "files.h"
 #include "outfiles.h"
 #include "patch.h"
@@ -30,8 +31,24 @@ static char g_pend[PEND_MAX];
 static int g_pend_n;
 static RepoSeenSet g_seen;
 static char g_prev_want[420];   // phase 8: what the model asked for in the last round (a repeat is not brought again)
-static char g_warn[700];        // phase 8: edits that changed the balance of () {} [] (the agent tells the model)
+static char g_warn[1500];        // phase 8: edits that changed the balance of () {} [] (the agent tells the model)
 static int g_warn_n;
+static char g_touched[24][160];   // phase 12: files the AI wrote this session (for /verificar)
+static int g_ntouched;
+
+static void touch(const char* rel) {
+    for (int i = 0; i < g_ntouched; i++)
+        if (!strcmp(g_touched[i], rel)) return;
+    if (g_ntouched < 24) snprintf(g_touched[g_ntouched++], sizeof(g_touched[0]), "%s", rel);
+}
+
+// Adds "rel:\n<issues>" to what the agent tells the model.
+static void warn_issues(const char* rel, const char* issues) {
+    int gl = (int)strlen(g_warn);
+    if (gl + 60 >= (int)sizeof(g_warn)) return;
+    snprintf(g_warn + gl, sizeof(g_warn) - gl, "%s:\n%s", rel, issues);
+    g_warn_n++;
+}
 
 static void load(void) {
     if (g_loaded) return;
@@ -85,7 +102,7 @@ static int word_is(const char* t, int tl, const char* lit) {
 
 static const char* const NAMES[] = {"proyecto", "project", "mapa", "map", "grep", "grep", "aplicar", "apply",
                                     "empaquetar", "zip", "auto", "limite", "limit", "proyectos", "projects",
-                                    "instrucciones", "instructions", "poke", "parchear", "errores", "errors", "trucos", "cheats", "deshacer", "undo", NULL};
+                                    "instrucciones", "instructions", "poke", "parchear", "errores", "errors", "trucos", "cheats", "deshacer", "undo", "verificar", "verify", NULL};
 
 // Which command (index into NAMES) and where its arguments start. -1 when text is none of them.
 static int parse(const char* text, const char** args) {
@@ -175,11 +192,20 @@ static int apply_reply(const char* reply, char* report, int rmax, int* ok, int* 
             (*bad)++;
         } else {
             int bal0[3] = {0, 0, 0}, bal1[3];
+            char vi0[400], vi1[700];
+            int v0 = exists ? verify_text(rel, fbuf, len, vi0, sizeof(vi0)) : 0;
             if (exists) patch_balance(rel, fbuf, len, bal0);
             int rc = patch_apply(fbuf, &len, FBUF + 32 * 1024 - 1, b, exists, &line, &how, hint, sizeof(hint));
             if (rc == 0 && outfiles_write(rel, fbuf, len) == 0) {
                 snprintf(what, sizeof(what), "OK %s (line %d, %s match)", rel, line, how);
                 (*ok)++;
+                touch(rel);
+                int v1 = verify_text(rel, fbuf, len, vi1, sizeof(vi1));
+                if (v1 > v0) {   // the edit made the file worse than it was: say what
+                    int wl = (int)strlen(what);
+                    snprintf(what + wl, sizeof(what) - wl, " PROBLEMS:\n%.400s", vi1);
+                    warn_issues(rel, vi1);
+                }
                 if (patch_balance(rel, fbuf, len, bal1) && (bal1[0] != bal0[0] || bal1[1] != bal0[1] || bal1[2] != bal0[2])) {
                     char w[200];   // an edit rarely changes how many brackets are open: a block was left open or closed twice
                     snprintf(w, sizeof(w), " WARNING: now %+d in () %+d in {} %+d in [] (open minus closed, compared with before).",
@@ -557,6 +583,39 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
             pend("[GoldHEN]", gi, n);
             snprintf(note, nm, "%.1200s(This list also goes with your next message.)", gi);
         }
+    } else if (c == 25 || c == 26) {   // /verificar [file]: the check of the app on a file the AI wrote (or any file of the project)
+        static char vtxt[1400];
+        int total = 0, nfile = 0;
+        vtxt[0] = 0;
+        const char* list[25];
+        int nl = 0;
+        if (args[0]) list[nl++] = args;
+        else
+            for (int i = 0; i < g_ntouched && nl < 24; i++) list[nl++] = g_touched[i];
+        for (int i = 0; i < nl; i++) {
+            char vi[500], spec[160], pr[160];
+            int sl = 0, k = 0;
+            while (list[i][k] && list[i][k] != ' ' && list[i][k] != '\n' && k < 159) spec[k] = list[i][k], k++;
+            spec[k] = 0;
+            const char* shown = spec;
+            int r = read_out(spec, fbuf, FBUF, &sl);
+            if (r != 1 && files_project_read(spec, fbuf, FBUF, &sl, pr, sizeof(pr)) == 1) r = 1, shown = pr;
+            if (r != 1) {
+                int tl = (int)strlen(vtxt);
+                snprintf(vtxt + tl, sizeof(vtxt) - tl, "%s: not found (or not text)\n", spec);
+                continue;
+            }
+            nfile++;
+            int n = verify_text(shown, fbuf, sl, vi, sizeof(vi));
+            if (n > 0) {
+                total += n;
+                int tl = (int)strlen(vtxt);
+                if (tl + 40 < (int)sizeof(vtxt)) snprintf(vtxt + tl, sizeof(vtxt) - tl, "%s:\n%.350s", shown, vi);
+            }
+        }
+        if (nl == 0) snprintf(note, nm, "Nothing to check yet: the AI has written no file this session. /verificar path checks any file of the project.");
+        else if (!total && nfile) snprintf(note, nm, "Checked %d file(s): no problems found (JSON, YAML/workflows, Python, shell, C and Markdown are checked).", nfile);
+        else snprintf(note, nm, "%d problem(s):\n%.1200s", total, vtxt);
     } else if (c == 23 || c == 24) {   // /deshacer
         undo_last(note, nm);
     } else {   // /limite
@@ -596,6 +655,13 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
         if (nfiles > 0) {
             char fnote[400] = "";
             nf = outfiles_save(reply, fnote, sizeof(fnote));
+            for (int k = 0; k < outfiles_saved_count(); k++) {   // phase 12: check what was written
+                const char* sp = outfiles_saved_path(k);
+                int sl = 0;
+                char vi[700];
+                touch(sp);
+                if (read_out(sp, fbuf, FBUF, &sl) == 1 && verify_text(sp, fbuf, sl, vi, sizeof(vi)) > 0) warn_issues(sp, vi);
+            }
             if (nf > 0) {
                 char lg[420];
                 snprintf(lg, sizeof(lg), "GUARDADO %s\n", fnote);
@@ -607,11 +673,11 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
         char fpart[80] = "";
         if (nf > 0) snprintf(fpart, sizeof(fpart), ", %d file(s) saved", nf);
         if (!bad && g_warn_n) {   // applied, but the brackets no longer add up: the model looks at it once
-            snprintf(note, note_max, "Auto: %d edit(s) applied%s, but the brackets changed (%s). Telling the model.", ok, fpart, g_warn_n > 1 ? "several files" : "see CAMBIOS.txt");
+            snprintf(note, note_max, "Auto: %d edit(s) applied%s, but the check found problems (%s). Telling the model.", ok, fpart, g_warn_n > 1 ? "several files" : "see CAMBIOS.txt");
             snprintf(next_msg, next_max,
-                     "Los cambios se aplicaron, pero la comprobacion de llaves avisa (abiertos menos cerrados, frente a antes):\n%s"
-                     "Un cambio normal no cambia esos numeros. Revisa tu ultimo bloque: ¿falta o sobra un }, ) o ]? "
-                     "Si hay un error, reenvia SOLO el bloque corregido; si esta bien, di \"correcto\" y no pidas nada mas.",
+                     "Los cambios se aplicaron, pero la comprobacion de la app avisa de esto en lo que escribiste:\n%s"
+                     "(Los numeros +N/-N son llaves abiertas menos cerradas frente a antes: un cambio normal no los cambia.) "
+                     "Revisa tu ultimo bloque. Si hay un error, reenvia SOLO el bloque corregido; si esta bien, di \"correcto\" y no pidas nada mas.",
                      g_warn);
             return 1;
         }
@@ -650,14 +716,14 @@ int devcmd_agent_step(const char* reply, int net_on, char* next_msg, int next_ma
     return 0;
 }
 
-const char* devcmd_system_prompt(void) {
+const char* devcmd_system_prompt(void) {   // (the same text as docs/garlic_system.txt, used when /data/garlic_system.txt is missing)
     return
            "Eres un asistente de programación en una PS4, sin internet. Respondes en el idioma del usuario, breve y concreto. No puedes abrir archivos: la app te los da. Tampoco guardas nada tú: la app guarda lo que escribes en bloques de archivo.\n"
            "\n"
            "CÓMO TRABAJAS\n"
-           "1. Entiende la petición. Si no tienes el código, pídelo antes de opinar; no adivines lo que no has visto.\n"
-           "2. Pide lo mínimo, máx. 3 líneas, solo la petición y nada más: por ejemplo @zip:chat/main.c#send_text, @zip:chat/files.c:100-180 o @zip?dns+tls. Un @zip solo es el mapa del repo. No pidas archivos enteros grandes ni repitas lo que ya te llegó; si llegó cortado, pide el rango que falta.\n"
-           "3. Usa solo rutas que aparezcan en el mapa; los ejemplos de arriba no son archivos de este proyecto.\n"
+           "1. Entiende la petición. Si no tienes el código, pídelo antes de opinar; no adivines lo que no has visto. El mapa del repo empieza con \"Project:\" (lenguajes, build, CI): úsalo para saber con qué trabajas.\n"
+           "2. Pide lo mínimo, máx. 3 líneas, solo la petición: @zip:chat/main.c#send_text (una función), @zip:chat/files.c:100-180 (líneas), @zip?dns+tls (buscar palabras), @zip!send_text (todos los sitios que usan ese nombre). Un @zip solo es el mapa. No pidas archivos enteros grandes ni repitas lo que ya te llegó; si llegó cortado, pide el rango que falta. Usa solo rutas del mapa: los ejemplos no son de este proyecto.\n"
+           "3. Antes de cambiar una función, un nombre o sus parámetros, mira quién lo usa (@zip!nombre) y cambia también esos sitios. No cambies solo la definición.\n"
            "4. Cambiar un archivo que existe, un bloque por cambio:\n"
            "Archivo: chat/ask.c\n"
            "<<<<<<< BUSCAR\n"
@@ -666,21 +732,24 @@ const char* devcmd_system_prompt(void) {
            "    int a = 2;\n"
            ">>>>>>> REEMPLAZAR\n"
            "BUSCAR se copia tal cual del código que viste (misma sangría) y debe ser único. Varios cambios, varios bloques.\n"
-           "5. CREAR un archivo (un .yml, un .md, un script, un proyecto nuevo): una línea \"Archivo: ruta/nombre.ext\" y debajo un bloque ``` con TODO su contenido; un bloque por archivo. La app los guarda sola (o con /aplicar). Si son varios archivos grandes, entrega uno por respuesta y di cuál sigue (una respuesta larga se corta). Nunca digas que no puedes crear archivos, carpetas ni zips: /empaquetar hace el zip.\n"
-           "6. Después: una línea con lo que hiciste y otra con cómo comprobarlo. Si el cambio exige tocar otro archivo (cabecera, llamadas), pídelo o cámbialo también.\n"
+           "5. CREAR un archivo (.yml, .md, script, proyecto nuevo): una línea \"Archivo: ruta/nombre.ext\" y debajo un bloque ``` con TODO su contenido. La app lo guarda sola. Varios archivos grandes: uno por respuesta, y di cuál sigue. Nunca digas que no puedes crear archivos o zips: /empaquetar hace el zip.\n"
+           "6. Termina con una línea de lo que hiciste y otra de cómo comprobarlo. Si no puedes comprobar algo, dilo; no afirmes que funciona.\n"
+           "\n"
+           "WORKFLOWS DE GITHUB ACTIONS (.github/workflows/*.yml)\n"
+           "- Sangría con espacios (2), nunca tabuladores. Cada paso lleva uses: dueño/acción@vN o run:. No inventes acciones ni versiones: copia las que ya hay.\n"
+           "- Un run: con \": \" dentro va en bloque con |. Cambia el paso mínimo; no rehagas el archivo entero.\n"
+           "- Ante un fallo del build, pide /errores y busca la primera línea con error, no las últimas.\n"
            "\n"
            "REGLAS\n"
            "- Ante un error: la causa primero, luego el cambio mínimo. No reescribas lo que funciona.\n"
            "- Respeta el estilo del proyecto. No inventes funciones, APIs ni versiones; si dudas, dilo y di qué comprobarías.\n"
-           "- No inventes cómo funciona esta app ni sus comandos: si no lo viste, dilo (la lista está en /ayuda).\n"
-           "- Si la app dice que un bloque falló, reenvía solo ese, copiando el texto que ella te muestra. Si avisa de que las llaves no cuadran, revisa tu último bloque.\n"
-           "- Si el mensaje empieza con [REINICIO], el contexto se reinició: sigue desde TUS NOTAS sin repetir lo hecho.\n"
-           "- Si algo llegó cortado, avisa.\n"
-           "- Si el usuario habla de un fallo al compilar y no tienes el log, dile que escriba /errores: la app te manda cada error con el código de alrededor. Si un cambio salió mal, /deshacer lo revierte. Antes de editar una partida, que mire /trucos CUSAxxxxx (trucos y parches de GoldHEN del juego).\n"
+           "- No inventes cómo funciona esta app ni sus comandos (lista en /ayuda).\n"
+           "- La app revisa lo que escribes (YAML, JSON, Python, shell, C): si avisa de un problema o de que las llaves no cuadran, corrige solo ese bloque. Si un bloque falló, reenvía solo ese copiando el texto que ella te muestra. /deshacer revierte; /verificar revisa un archivo.\n"
+           "- Si el mensaje empieza con [REINICIO], el contexto se reinició: sigue desde TUS NOTAS sin repetir lo hecho. Si algo llegó cortado, avisa.\n"
+           "- Hay una API local (OpenAI, Ollama, KoboldCpp) y una página de chat: /api muestra las direcciones.\n"
            "\n"
-           "PARTIDAS GUARDADAS Y ARCHIVOS BINARIOS (no son texto: no inventes su contenido)\n"
-           "- No lees bytes ni calculas: la app lo hace. @zip lista todo el zip; @zip:archivo da un informe; @zip:archivo:0x100-0x1ff, el hex de un rango con su valor como número; @zip?=12500, dónde está ese número en todos los archivos; @antes.zip~despues.zip, qué bytes cambiaron.\n"
-           "- Para cambiar un valor (dinero, vidas...): 1) pide al usuario el valor actual y busca @zip?=VALOR; 2) si sale en varios sitios, que lo cambie en el juego, guarde otra partida y compara @antes.zip~despues.zip: el desplazamiento que pasó del valor viejo al nuevo es el bueno; 3) termina con UNA línea sola: /poke OFFSET TIPO VALOR ARCHIVO (ej. /poke 0x40 u32 999999 SAVEDATA/slot0.dat). El usuario escribe /aplicar y la app crea nombre-mod.zip; el original no se toca.\n"
-           "- TIPO: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64; usa el que la app halló (u32le = u32). Si el informe dice que los bytes parecen aleatorios (cifrado o comprimido), dilo: no se puede editar así.\n"
-           "- Cambios pequeños junto al valor (suma de comprobación, contador) pueden hacer que el juego rechace la partida: avisa y no prometas que funcione.\n";
+           "PARTIDAS GUARDADAS Y BINARIOS (no son texto: no inventes su contenido)\n"
+           "- La app lee los bytes: @zip lista el zip; @zip:archivo informe; @zip:archivo:0x100-0x1ff hex; @zip?=12500 dónde está ese número; @antes.zip~despues.zip qué bytes cambiaron. Antes de editar una partida, /trucos CUSAxxxxx.\n"
+           "- Para cambiar un valor: busca @zip?=VALOR; si sale en varios sitios, que el usuario lo cambie en el juego, guarde otra partida y compara con ~: el offset que pasó del valor viejo al nuevo es el bueno. Termina con UNA línea sola: /poke OFFSET TIPO VALOR ARCHIVO (ej. /poke 0x40 u32 999999 SAVEDATA/slot0.dat); el usuario escribe /aplicar y se crea nombre-mod.zip sin tocar el original.\n"
+           "- TIPO: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64. Si los bytes parecen aleatorios (cifrado o comprimido), dilo: no se puede editar. Una suma de comprobación puede hacer que el juego rechace la partida: no prometas que funcione.\n";
 }

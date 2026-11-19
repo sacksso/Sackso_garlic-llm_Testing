@@ -681,7 +681,7 @@ static void hist_ahead(int tokens) {
 
 // The system prompt goes through the model ahead of time while nothing else runs (a new conversation then starts
 // with pos = its length): a few tokens per call, so the screen keeps moving. sys_pre counts the tokens done.
-static uint32_t sys_ids[1536];
+static uint32_t sys_ids[2304];   // (phase 12: the dev prompt is ~1400 tokens and a project block follows)
 static int sys_n, sys_pre;
 
 #define SYSTEM_PROMPT_TEXT tr(S_SYSTEM_PROMPT)
@@ -736,7 +736,7 @@ static void system_ahead(int tokens) {
         return;
     }
     if (sys_pre == 0) {
-        sys_n = system_ids(sys_ids, 1536);
+        sys_n = system_ids(sys_ids, 2304);
         engine_reset(&eng), api_cache_drop();
     }
     int k = sys_n - sys_pre < tokens ? sys_n - sys_pre : tokens;
@@ -1570,7 +1570,7 @@ static void send_text(const char* text) {
     if (pl + dl > 16000) dl = 0, devcmd_take_pending(ctx, 0);
     // How much code fits: the tokens left in the context, less the reply (and a reasoning), the system prompt of a new
     // chat and the typed text; about 2.7 bytes per token. /limite caps it.
-    int tok_free = (int)eng.ctx_limit - pos - 1100 - (think_on ? think_cap + 64 : 0) - (pos < 1200 ? 1100 : 0) - (int)strlen(text) / 2;
+    int tok_free = (int)eng.ctx_limit - pos - 1100 - (think_on ? think_cap + 64 : 0) - (pos < 1600 ? 1600 - pos : 0) - (int)strlen(text) / 2;
     int lim = devcmd_token_limit();
     if (lim > 0 && tok_free > lim) tok_free = lim;
     int budget = tok_free > 0 ? tok_free * 27 / 10 : 0;

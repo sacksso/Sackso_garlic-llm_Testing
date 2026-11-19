@@ -6,7 +6,9 @@
 #define UNDO_H
 
 #ifndef UNDO_DIR
+#ifndef UNDO_DIR
 #define UNDO_DIR "/data/garlic_undo"
+#endif
 #endif
 
 void undo_begin(void);        // a new batch starts (its files are recorded by undo_record)

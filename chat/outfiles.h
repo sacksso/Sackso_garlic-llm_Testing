@@ -28,4 +28,8 @@ int outfiles_write(const char* rel, const char* data, int n);
 // 1 when rel is a safe relative path (no "..", no absolute path, limited depth and characters).
 int outfiles_path_ok(const char* rel);
 
+// Phase 12: the files the last outfiles_save wrote (paths under OUT_DIR), so they can be checked.
+int outfiles_saved_count(void);
+const char* outfiles_saved_path(int i);
+
 #endif

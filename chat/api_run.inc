@@ -20,6 +20,31 @@ static uint32_t api_ids[16384];   // the prompt of a job (byte-level tokens: at 
 static uint32_t api_cache_ids[16384];
 static int api_cache_n;   // positions the saved state stands for; 0 = nothing saved
 static void api_cache_drop(void) { api_cache_n = 0; }
+// The previous request's ids, to see where a new one starts to differ (and to choose where to save the state).
+static uint32_t api_prev_ids[16384];
+static int api_prev_n, api_prev_snap;
+
+// What the tokens ids[from..to) say, for the log (control characters shown as marks; at most max-1 bytes).
+static void api_tok_text(const uint32_t* ids, int from, int to, char* out, int max) {
+    int o = 0;
+    for (int i = from < 0 ? 0 : from; i < to && o < max - 8; i++) {
+        const uint8_t* b = NULL;
+        int nb = tok_piece(&tok, ids[i], &b);
+        if (nb <= 0 || !b) {   // a special token (the template's markers)
+            const char* m = ids[i] == IM_START ? "<|start|>" : ids[i] == IM_END ? "<|end|>" : "<?>";
+            for (const char* c = m; *c && o < max - 1; c++) out[o++] = *c;
+            continue;
+        }
+        for (int k = 0; k < nb && o < max - 4; k++) {
+            uint8_t c = b[k];
+            if (c == '\n') out[o++] = '|';
+            else if (c < 32 || c == '%') out[o++] = '.';
+            else out[o++] = (char)c;
+        }
+    }
+    out[o] = 0;
+}
+
 static int api_cache_room(void) {
     uint64_t need = engine_state_size(&eng);
     return eng.asr.ws_end && eng.asr.ws_end - eng.asr.ws_begin >= need;
@@ -210,31 +235,50 @@ static void api_job(ApiJob* job) {
     int reuse_n = api_cache_n;
     api_cache_n = 0;   // (until a state is saved again, or the old one is confirmed below)
     int start = 0;
-    if (api_cache_on && reuse_n > 0 && reuse_n <= snap && (snap < n || reuse_n < n) &&
-        !memcmp(api_cache_ids, api_ids, sizeof(uint32_t) * (size_t)reuse_n)) {
+    if (api_cache_on && reuse_n > 0 && reuse_n < n && !memcmp(api_cache_ids, api_ids, sizeof(uint32_t) * (size_t)reuse_n)) {
         if (engine_state_copy(&eng, eng.asr.ws_begin, 0) == 0) start = reuse_n;
         else say("api: cache: the state could not be put back (%s); the whole prompt is read", eng.error);
     }
+    // Where this prompt and the last one stop being the same. A conversation that grows shares its whole history, and
+    // the state is kept at the end of it. Requests that differ inside the history (a game that asks for a reply, then
+    // for something else, with the same start) share only that start: the state is kept there, and both kinds of
+    // request find it.
+    int lcp = 0;
+    for (int m = api_prev_n < n ? api_prev_n : n; lcp < m && api_prev_ids[lcp] == api_ids[lcp];) lcp++;
+    int save_at = snap;
+    if (api_prev_n > 0 && lcp < api_prev_snap && lcp >= 48) save_at = lcp;
+    if (save_at >= n && snap < n) save_at = snap;
+    if (api_prev_n > 0 && !start) {
+        char a[130], b[130];
+        api_tok_text(api_ids, lcp - 12, lcp + 18, a, sizeof(a));
+        api_tok_text(api_prev_ids, lcp - 12, lcp + 18, b, sizeof(b));
+        say("api: the prompt shares %d of its %d tokens with the last request's %d (history %d); the state is kept at %d", lcp, n,
+            api_prev_n, api_prev_snap, save_at);
+        if (lcp < api_prev_snap) say("api: they differ here: new [%s] / before [%s]", a, b);
+    }
+    memcpy(api_prev_ids, api_ids, sizeof(uint32_t) * (size_t)n);
+    api_prev_n = n;
+    api_prev_snap = snap;
     say("api: %s prompt of %d tokens, up to %d new, T %.2f%s%s", kind == API_K_OPENAI_CHAT ? "chat" : kind == API_K_OPENAI_TEXT ? "text" :
         kind <= API_K_KOBOLD_STREAM ? "kobold" : "ollama", n, g.max_tokens, g.temperature, g.stream ? ", streamed" : "",
         g.n_stops ? ", with stop sequences" : "");
     if (start) say("api: cache hit: %d of the %d prompt tokens come from the saved state, %d to read", start, n, n - start);
     else if (api_cache_on) say("api: cache miss: the whole prompt is read");
     if (!start) engine_reset(&eng);
-    // One read of the prompt, as it always was; with the cache on and room for the state it is two: the history, where
-    // the state is saved, then the generation prompt.
+    // One read of the prompt, as it always was; with the cache on and room for the state it is two: up to where the
+    // state is kept, then the rest.
     int failed = 0;
-    const int save = api_cache_on && snap > start && api_cache_room();
-    const int upto = save ? snap : n;
+    const int save = api_cache_on && save_at > start && api_cache_room();
+    const int upto = save ? save_at : n;
     if (upto > start) failed = engine_run(&eng, api_ids + start, upto - start, start, (float)g.temperature, seed++, &next_token);
     if (!failed) {
         if (save && engine_state_copy(&eng, eng.asr.ws_begin, 1) == 0) {
-            memcpy(api_cache_ids, api_ids, sizeof(uint32_t) * (size_t)snap);
-            api_cache_n = snap;   // (a state that stands for this prompt's history)
+            memcpy(api_cache_ids, api_ids, sizeof(uint32_t) * (size_t)save_at);
+            api_cache_n = save_at;   // (a state that stands for the first save_at ids)
         } else if (start) {
             api_cache_n = reuse_n;   // (nothing new saved: the old state still stands in the work memory)
         }
-        if (save && snap < n) failed = engine_run(&eng, api_ids + snap, n - snap, snap, (float)g.temperature, seed++, &next_token);
+        if (save && save_at < n) failed = engine_run(&eng, api_ids + save_at, n - save_at, save_at, (float)g.temperature, seed++, &next_token);
     }
     if (failed) {
         api_cache_n = 0;

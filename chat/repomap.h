@@ -62,4 +62,9 @@ int repo_extract_lines(const char* text, int len, int a, int b, char* out, int m
 // they are written into out separated by single spaces.
 int repo_keywords(const char* text, char* out, int max);
 
+// Phase 12: every use of an identifier (whole word) in the source files of the zip, file by file with the first lines,
+// the files that define it first ("what else must change if I change this?"). Returns the number of files, < 0 as
+// zip_open_dir does; *total_hits (may be NULL) gets the number of lines that use it.
+int repo_refs(const char* zip_path, const char* name, char* out, int max, int* total_hits);
+
 #endif

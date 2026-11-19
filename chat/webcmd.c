@@ -659,6 +659,7 @@ int webcmd_run(const char* t, char* note, int nm) {
                  "INTERNET (/red on first)\n/web words   /abrir N   /wiki words\n/url https://...   /gh owner/repo [path | zip]\n"
                  "PROJECT\n/proyecto zip   /mapa   /grep words   /aplicar   /empaquetar   /auto on|off [N]   /limite N\n"
                  "BUILD LOG, UNDO, GOLDHEN\n/errores [log] [repo.zip]  errors of a build log with the code   /deshacer  undo the last change of the AI   /trucos CUSA06548  GoldHEN cheats\n"
+                 "CHECK\n/verificar [file]  checks a file (YAML/workflows, JSON, Python, shell, C, Markdown); the agent does it after each edit   @zip!name  every place that uses a name\n"
                  "SAVED GAMES (binary files)\n@save.zip:file (report)   @save.zip:file:0x100-0x1ff (hex)   @save.zip?=12500 (find a number)   @before.zip~after.zip (what changed)   /poke OFFSET TYPE VALUE FILE [zip]\n"
                  "PROGRESS\n/progreso  the model writes its notes, saved   |   /retomar  fresh context from them\n"
                  "API (phone, PC, games)\n/api  addresses   |   /api on|off   |   /cache on|off   |   /puerto N\n"

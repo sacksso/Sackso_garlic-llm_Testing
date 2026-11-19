@@ -205,6 +205,38 @@ static int has_err(const Err* es, int n, const char* path, int line, const char*
     return 0;
 }
 
+// Phase 12: GitHub tells where a workflow file is wrong in several shapes:
+//   Invalid workflow file: .github/workflows/ci.yml#L12
+//   .github/workflows/ci.yml (Line: 12, Col: 5): Unexpected value 'x'
+// The place is the file and line; the code around it is added like for a compiler error.
+static int parse_workflow(const char* ln, Err* e) {
+    const char* w = strstr(ln, ".github/workflows/");
+    if (!w) return 0;
+    const char* p = w;
+    while (*p && *p != ' ' && *p != '#' && *p != ':' && *p != ',' && *p != '(' && *p != '\'' && *p != '"') p++;
+    int pl = (int)(p - w);
+    if (pl < 20 || pl >= (int)sizeof(e->path)) return 0;
+    long line = 0;
+    if (!strncmp(p, "#L", 2)) line = atol(p + 2);
+    else {
+        const char* l = strstr(p, "Line: ");
+        if (l) line = atol(l + 6);
+    }
+    if (line <= 0) {
+        const char* l = strstr(ln, "on line ");   // "You have an error in your yaml syntax on line 12"
+        if (l) line = atol(l + 8);
+    }
+    if (line <= 0) return 0;
+    memcpy(e->path, w, pl);
+    e->path[pl] = 0;
+    e->line = (int)line;
+    const char* m = ln;
+    if (!strncmp(m, "##[error]", 9)) m += 9;
+    snprintf(e->msg, sizeof(e->msg), "%.230s", m);
+    e->kind = 0;
+    return 1;
+}
+
 static int collect(char* t, const int* st, int nl, Err* es) {
     int n = 0;
     for (int i = 0; i < nl && n < MAX_ERR; i++) {
@@ -213,6 +245,10 @@ static int collect(char* t, const int* st, int nl, Err* es) {
         memset(&e, 0, sizeof(e));
         e.log_line = i;
         if (parse_compiler(ln, &e)) {
+            if (!has_err(es, n, e.path, e.line, e.msg)) es[n++] = e;
+            continue;
+        }
+        if (parse_workflow(ln, &e)) {
             if (!has_err(es, n, e.path, e.line, e.msg)) es[n++] = e;
             continue;
         }

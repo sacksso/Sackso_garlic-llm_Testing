@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -838,6 +839,251 @@ static int render_map(const char* zip_name, char* out, int max, int syms, int de
     return o;
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------------
+// phase 12: what kind of project it is (languages, build files, CI, tests), as two or three lines on top of the map
+
+
+// 1 when the first len bytes of s contain lit.
+static int strstr_n(const char* s, int len, const char* lit) {
+    int l = (int)strlen(lit);
+    for (int i = 0; i + l <= len; i++)
+        if (!memcmp(s + i, lit, l)) return 1;
+    return 0;
+}
+
+static int base_is(const char* rel, const char* name) {
+    const char* b = strrchr(rel, '/');
+    b = b ? b + 1 : rel;
+    return !strcmp(b, name);
+}
+
+static int has_ext(const char* rel, const char* ext) {
+    int l = (int)strlen(rel), e = (int)strlen(ext);
+    return l > e && rel[l - e - 1] == '.' && !strcmp(rel + l - e, ext);
+}
+
+static const char* lang_name(const char* rel) {
+    static const struct { const char* ext; const char* name; } T[] = {
+        {"c", "C"}, {"h", "C"}, {"cc", "C++"}, {"cpp", "C++"}, {"hpp", "C++"}, {"py", "Python"}, {"js", "JavaScript"}, {"mjs", "JavaScript"},
+        {"ts", "TypeScript"}, {"tsx", "TypeScript"}, {"jsx", "JavaScript"}, {"go", "Go"}, {"rs", "Rust"}, {"zig", "Zig"}, {"java", "Java"},
+        {"kt", "Kotlin"}, {"cs", "C#"}, {"sh", "Shell"}, {"lua", "Lua"}, {"rb", "Ruby"}, {"php", "PHP"}, {"swift", "Swift"}, {"rpy", "Ren'Py"},
+        {"gd", "GDScript"}, {"glsl", "GLSL"}, {"cl", "OpenCL"}, {"asm", "Assembly"}, {"s", "Assembly"}, {NULL, NULL}};
+    for (int i = 0; T[i].ext; i++)
+        if (has_ext(rel, T[i].ext)) return T[i].name;
+    return NULL;
+}
+
+// Triggers, jobs and number of steps of a GitHub Actions workflow in rbuf[0..len), as "on: push, workflow_dispatch; jobs: build (14 steps)".
+static void workflow_summary(const char* t, int len, char* out, int max) {
+    char on[160] = "", jobs[200] = "";
+    int in_on = 0, in_jobs = 0, steps_ind = -1, steps = 0, job_steps = 0;
+    char job[40] = "";
+    int p = 0;
+    while (p < len) {
+        int e = p;
+        while (e < len && t[e] != '\n') e++;
+        int ind = 0;
+        while (p + ind < e && t[p + ind] == ' ') ind++;
+        const char* l = t + p + ind;
+        int ll = e - p - ind;
+        if (ll > 0 && l[ll - 1] == '\r') ll--;
+        if (ll > 0 && l[0] != '#') {
+            if (ind == 0) {
+                in_on = in_jobs = 0;
+                if (!strncmp(l, "on:", 3) || !strncmp(l, "'on':", 5) || !strncmp(l, "\"on\":", 5)) {
+                    in_on = 1;
+                    const char* c = memchr(l, ':', ll);
+                    int rest = ll - (int)(c + 1 - l);
+                    while (rest > 0 && c[1] == ' ') c++, rest--;
+                    if (rest > 0) snprintf(on, sizeof(on), "%.*s", rest > 80 ? 80 : rest, c + 1);
+                } else if (!strncmp(l, "jobs:", 5)) in_jobs = 1;
+            } else if (in_on && ind == 2) {
+                const char* c = memchr(l, ':', ll);
+                int nl = c ? (int)(c - l) : ll;
+                int ol = (int)strlen(on);
+                if (nl > 0 && ol + nl + 3 < (int)sizeof(on)) snprintf(on + ol, sizeof(on) - ol, "%s%.*s", ol ? ", " : "", nl, l);
+            } else if (in_jobs && ind == 2 && memchr(l, ':', ll) && l[0] != '-') {
+                if (job[0]) {
+                    int jl = (int)strlen(jobs);
+                    snprintf(jobs + jl, sizeof(jobs) - jl, "%s%s (%d steps)", jl ? ", " : "", job, job_steps);
+                }
+                const char* c = memchr(l, ':', ll);
+                snprintf(job, sizeof(job), "%.*s", (int)(c - l) > 39 ? 39 : (int)(c - l), l);
+                job_steps = 0;
+                steps_ind = -1;
+            } else if (in_jobs && ll >= 2 && l[0] == '-' && l[1] == ' ') {
+                if (steps_ind < 0 && ind >= 4) steps_ind = ind;
+                if (ind == steps_ind) job_steps++, steps++;
+            }
+        }
+        p = e + 1;
+    }
+    if (job[0]) {
+        int jl = (int)strlen(jobs);
+        snprintf(jobs + jl, sizeof(jobs) - jl, "%s%s (%d steps)", jl ? ", " : "", job, job_steps);
+    }
+    (void)steps;
+    snprintf(out, max, "on: %s; jobs: %s", on[0] ? on : "?", jobs[0] ? jobs : "?");
+}
+
+static int build_facts(const char* zip_path, int n, char* out, int max) {
+    long by_lang[32];
+    const char* names[32];
+    int nl = 0;
+    long total = 0;
+    int n_tests = 0, n_wf = 0;
+    char builds[200] = "", wf[700] = "";
+    static const char* const BUILD[] = {"Makefile", "CMakeLists.txt", "build.zig", "package.json", "Cargo.toml", "go.mod", "pyproject.toml",
+                                        "setup.py", "requirements.txt", "pom.xml", "build.gradle", "Dockerfile", "meson.build", "build.py",
+                                        "project.godot", "options.rpy", NULL};
+    for (int p = 0; p < n; p++) {
+        const char* rel = g_ents[g_idx[p]].name + g_root;
+        if (g_kind[p] == K_FOLD) continue;
+        for (int b = 0; BUILD[b]; b++)
+            if (base_is(rel, BUILD[b]) && strlen(builds) + strlen(rel) + 3 < sizeof(builds)) {
+                int l = (int)strlen(builds);
+                if (!strstr(builds, rel)) snprintf(builds + l, sizeof(builds) - l, "%s%s", l ? ", " : "", rel);
+            }
+        if (!strncmp(rel, "tests/", 6) || !strncmp(rel, "test/", 5) || strstr(rel, "_test.") || strstr(rel, ".test.")) n_tests++;
+        if (g_kind[p] != K_SRC) continue;
+        const char* ln = lang_name(rel);
+        if (ln && strncmp(rel, ".github/", 8) != 0) {
+            int k = 0;
+            while (k < nl && strcmp(names[k], ln)) k++;
+            if (k == nl && nl < 32) names[nl] = ln, by_lang[nl++] = 0;
+            if (k < 32) by_lang[k] += g_ents[g_idx[p]].usize;
+            total += g_ents[g_idx[p]].usize;
+        }
+        if (!strncmp(rel, ".github/workflows/", 18) && (has_ext(rel, "yml") || has_ext(rel, "yaml")) && n_wf < 3 && g_ents[g_idx[p]].usize < 40000) {
+            int cut = 0;
+            int r = read_entry(zip_path, p, &cut);
+            if (r > 0) {
+                char sm[300];
+                workflow_summary(rbuf, r, sm, sizeof(sm));
+                int l = (int)strlen(wf);
+                snprintf(wf + l, sizeof(wf) - l, "%s%s (%s)", l ? "; " : "", rel, sm);
+                n_wf++;
+            }
+        }
+    }
+    for (int i = 0; i < nl; i++)   // biggest first
+        for (int j = i + 1; j < nl; j++)
+            if (by_lang[j] > by_lang[i]) {
+                long tl = by_lang[i];
+                by_lang[i] = by_lang[j];
+                by_lang[j] = tl;
+                const char* tn = names[i];
+                names[i] = names[j];
+                names[j] = tn;
+            }
+    int o = 0;
+    char langs[160] = "";
+    for (int i = 0; i < nl && i < 4 && total > 0; i++) {
+        int l = (int)strlen(langs);
+        int pct = (int)(by_lang[i] * 100 / total);
+        if (pct < 3 && i > 0) break;
+        snprintf(langs + l, sizeof(langs) - l, "%s%s %d%%", l ? ", " : "", names[i], pct);
+    }
+    o += snprintf(out + o, max - o, "Project: %s | build: %s | tests: %d files\n", langs[0] ? langs : "no source", builds[0] ? builds : "none found", n_tests);
+    if (n_wf && o < max) o += snprintf(out + o, max - o, "CI: %s\n", wf);
+    if (o >= max) o = 0;
+    out[o] = 0;
+    return o;
+}
+
+// All the places that use a name (an identifier), file by file, definitions first. Returns the number of files with hits
+// (0 = none), < 0 as zip_open_dir does; *total gets the number of hits.
+int repo_refs(const char* zip_path, const char* name, char* out, int max, int* total_hits) {
+    int n = load_index(zip_path);
+    if (n < 0) return n;
+    char id[72];
+    int il = 0;
+    while (name[il] && il < 64 && (isalnum((unsigned char)name[il]) || name[il] == '_')) id[il] = name[il], il++;
+    id[il] = 0;
+    out[0] = 0;
+    if (total_hits) *total_hits = 0;
+    if (il < 2) {
+        snprintf(out, max, "Give an identifier of at least 2 characters.\n");
+        return 0;
+    }
+    int o = 0, files = 0, hits_all = 0, pass_files = 0;
+    char defs_done[MAXF / 8 + 1];
+    memset(defs_done, 0, sizeof(defs_done));
+    for (int pass = 0; pass < 2; pass++) {   // pass 0: files that define it; pass 1: the rest
+        for (int p = 0; p < n; p++) {
+            if (g_kind[p] != K_SRC) continue;
+            if (pass == 1 && (defs_done[p >> 3] & (1 << (p & 7)))) continue;
+            if (g_ents[g_idx[p]].usize > READ_MAX) continue;
+            int cut = 0;
+            int r = read_entry(zip_path, p, &cut);
+            if (r < 0) continue;
+            const char* rel = g_ents[g_idx[p]].name + g_root;
+            // collect hits of this file
+            int hits = 0, def_line = 0;
+            char lines_txt[1500];
+            int lt = 0, lineno = 1, shown = 0;
+            int ls = 0;
+            for (int i = 0; i <= r; i++) {
+                if (i < r && rbuf[i] != '\n') continue;
+                int le = i;
+                // whole-word search in [ls, le)
+                int found = 0, is_def = 0;
+                for (int k = ls; k + il <= le; k++) {
+                    if (rbuf[k] != id[0] || memcmp(rbuf + k, id, il)) continue;
+                    int before = k > ls && (isalnum((unsigned char)rbuf[k - 1]) || rbuf[k - 1] == '_');
+                    int after = k + il < le && (isalnum((unsigned char)rbuf[k + il]) || rbuf[k + il] == '_');
+                    if (before || after) continue;
+                    found = 1;
+                    int q = k + il;
+                    while (q < le && rbuf[q] == ' ') q++;
+                    if (q < le && rbuf[q] == '(') {   // a definition: code at the left margin or after def/func/fn/function, not indented
+                        int ind = 0;
+                        while (ls + ind < le && rbuf[ls + ind] == ' ') ind++;
+                        const char* ln0 = rbuf + ls;
+                        if ((ind == 0 && ln0[0] != '#' && ln0[0] != '}' && ln0[0] != '/' && ln0[0] != ' ' && k > ls && !strstr_n(ln0, k - ls, "=") && !strstr_n(ln0, k - ls, "return")) ||
+                            strstr_n(ln0, k - ls, "def ") || strstr_n(ln0, k - ls, "func ") || strstr_n(ln0, k - ls, "fn ") || strstr_n(ln0, k - ls, "function "))
+                            is_def = 1;
+                    }
+                    break;
+                }
+                if (found) {
+                    hits++;
+                    if (is_def && !def_line) def_line = lineno;
+                    if (shown < 4 && (pass == 1 || is_def || shown < 3)) {
+                        int ll = le - ls;
+                        while (ll > 0 && (rbuf[ls] == ' ' || rbuf[ls] == '\t')) ls++, ll--;
+                        if (ll > 110) ll = 110;
+                        if (ll > 0 && rbuf[ls + ll - 1] == '\r') ll--;
+                        if (lt + ll + 16 < (int)sizeof(lines_txt)) {
+                            lt += snprintf(lines_txt + lt, sizeof(lines_txt) - lt, "  %d%s: %.*s\n", lineno, is_def ? " (definition)" : "", ll, rbuf + ls);
+                            shown++;
+                        }
+                    }
+                }
+                ls = i + 1;
+                lineno++;
+            }
+            if (!hits) continue;
+            if ((pass == 0) != (def_line > 0)) continue;
+            if (pass == 0) defs_done[p >> 3] |= (char)(1 << (p & 7));
+            hits_all += hits;
+            files++;
+            pass_files++;
+            if (files > 40 || o + lt + 120 >= max) {
+                if (o + 60 < max) o += snprintf(out + o, max - o, "... (more files; narrow it with @zip?name+word)\n");
+                goto done;
+            }
+            o += snprintf(out + o, max - o, "--- %s: %d use%s%s ---\n%s", rel, hits, hits == 1 ? "" : "s", hits > shown ? " (some shown)" : "", lines_txt);
+        }
+    }
+done:
+    (void)pass_files;
+    if (total_hits) *total_hits = hits_all;
+    if (!files) snprintf(out, max, "No file uses \"%s\" as a whole word.\n", id);
+    return files;
+}
+
 int repomap_build(const char* zip_path, char* out, int max, int* n_source) {
     int n = load_index(zip_path);
     if (n < 0) return n;
@@ -896,19 +1142,22 @@ int repomap_build(const char* zip_path, char* out, int max, int* n_source) {
     for (int i = 0; i < n; i++) g_info[g_rank_order[i]].rank = i;   // dense ranks: 0 = most important
     const char* zname = strrchr(zip_path, '/');
     zname = zname ? zname + 1 : zip_path;
+    int flen = build_facts(zip_path, n, out, max / 6);   // phase 12: the kind of project goes first
+    char* ob = out + flen;
+    int omax = max - flen;
     static const int LEVELS[][2] = {{14, 1 << 30}, {8, 1 << 30}, {5, 1 << 30}, {4, 80}, {3, 40}, {2, 20}, {0, 0}};
     for (unsigned lv = 0; lv < sizeof(LEVELS) / sizeof(LEVELS[0]); lv++) {
-        int o = render_map(zname, out, max, LEVELS[lv][0], LEVELS[lv][1], g_total, n_src, n_skip, n_fold);
-        if (o >= 0) return o;   // the most detailed level that fits
+        int o = render_map(zname, ob, omax, LEVELS[lv][0], LEVELS[lv][1], g_total, n_src, n_skip, n_fold);
+        if (o >= 0) return o + flen;   // the most detailed level that fits
     }
     // not even the names fit: the head of the last level, cut at a line break
-    int o = render_map(zname, out, max, 0, 0, g_total, n_src, n_skip, n_fold);
+    int o = render_map(zname, ob, omax, 0, 0, g_total, n_src, n_skip, n_fold);
     if (o < 0) {
-        o = (int)strlen(out);
-        while (o > 0 && out[o - 1] != '\n') o--;
-        out[o] = 0;
+        o = (int)strlen(ob);
+        while (o > 0 && ob[o - 1] != '\n') o--;
+        ob[o] = 0;
     }
-    return o;
+    return o + flen;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

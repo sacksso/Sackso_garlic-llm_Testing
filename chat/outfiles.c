@@ -139,7 +139,15 @@ static void note_add(char* note, int max, const char* fmt, const char* a, long b
     snprintf(note + l, max - l, fmt, a, b);
 }
 
+static char g_saved[12][160];   // phase 12: the files written by the last outfiles_save (the agent checks them)
+static int g_nsaved;
+
+int outfiles_saved_count(void) { return g_nsaved; }
+
+const char* outfiles_saved_path(int i) { return i >= 0 && i < g_nsaved ? g_saved[i] : ""; }
+
 static int save_impl(const char* reply, char* note, int note_max, int dry) {
+    if (!dry) g_nsaved = 0;
     note[0] = 0;
     static char body[MAX_BYTES + 1];
     int written = 0, unnamed = 0, bad = 0, edits = 0;
@@ -243,6 +251,7 @@ static int save_impl(const char* reply, char* note, int note_max, int dry) {
                     if (b[i] != '\r') body[n++] = b[i];
                 if (n > 0 && body[n - 1] != '\n') body[n++] = '\n';
                 if (dry || write_file(name, body, n) == 0) {
+                    if (!dry && g_nsaved < 12) snprintf(g_saved[g_nsaved++], sizeof(g_saved[0]), "%s", name);
                     written++;
                     note_add(note, note_max, "%s (%ld B). ", name, n);
                 } else bad++;
