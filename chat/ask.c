@@ -7,7 +7,7 @@
 static int lc(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 
 static int name_char(unsigned char c) {   // the same set files.c accepts after an @
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+' || c == '=' || c == '~';
 }
 
 static const char* trim(const char* s) {

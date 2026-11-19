@@ -4,9 +4,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "ask.h"
+#include "bintools.h"
 #include "files.h"
 #include "outfiles.h"
 #include "patch.h"
@@ -80,7 +82,7 @@ static int word_is(const char* t, int tl, const char* lit) {
 
 static const char* const NAMES[] = {"proyecto", "project", "mapa", "map", "grep", "grep", "aplicar", "apply",
                                     "empaquetar", "zip", "auto", "limite", "limit", "proyectos", "projects",
-                                    "instrucciones", "instructions", NULL};
+                                    "instrucciones", "instructions", "poke", "parchear", NULL};
 
 // Which command (index into NAMES) and where its arguments start. -1 when text is none of them.
 static int parse(const char* text, const char** args) {
@@ -334,6 +336,53 @@ static void cmd_project(const char* args, char* note, int nm) {
 }
 
 // ---- commands ----
+// phase 10: /poke OFFSET TYPE VALUE FILE [zip] writes name-mod.zip, a copy of the saved game with those bytes changed.
+// Returns 1 when it wrote the new zip.
+static int do_poke(const char* args, char* note, int nm) {
+    char tk[5][120];
+    int nt = 0;
+    const char* p = args;
+    while (*p && nt < 5) {
+        while (*p == ' ' || *p == '`') p++;
+        if (!*p || *p == '\n') break;
+        int k = 0;
+        while (*p && *p != ' ' && *p != '\n' && k < 119) tk[nt][k++] = *p++;
+        while (k > 0 && (tk[nt][k - 1] == '`' || tk[nt][k - 1] == '.')) k--;   // ("/poke ... file." at the end of a sentence)
+        tk[nt++][k] = 0;
+    }
+    if (nt < 4) {
+        snprintf(note, nm, "Usage: /poke OFFSET TYPE VALUE FILE [zip]   e.g. /poke 0x40 u32 999999 SAVEDATA/slot0.dat   (TYPE: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64). It writes a NEW zip (name-mod.zip); the original is never changed.");
+        return 0;
+    }
+    char zip[96], sugg[200];
+    if (nt >= 5) {
+        if (!files_resolve_zip(tk[4], zip, sizeof(zip), sugg, sizeof(sugg))) {
+            snprintf(note, nm, "No such zip: %.60s (%s)", tk[4], sugg);
+            return 0;
+        }
+    } else snprintf(zip, sizeof(zip), "%s", files_project());
+    if (!zip[0]) {
+        snprintf(note, nm, "Which zip? Name it at the end (/poke ... FILE save.zip) or open it first with @save.zip.");
+        return 0;
+    }
+    char stem[96], src[220], dst[220];
+    snprintf(stem, sizeof(stem), "%s", zip);
+    int sl = (int)strlen(stem);
+    if (sl > 4 && !strcasecmp(stem + sl - 4, ".zip")) stem[sl - 4] = 0;
+    if (sl > 4 && strlen(stem) > 4 && !strcmp(stem + strlen(stem) - 4, "-mod")) stem[strlen(stem) - 4] = 0;   // (patching a patch keeps one -mod)
+    for (char* c = stem; *c; c++)
+        if (*c == '/') *c = '_';
+    snprintf(src, sizeof(src), FILES_DIR "/%s", zip);
+    snprintf(dst, sizeof(dst), FILES_DIR "/%s-mod.zip", stem);
+    int r = bin_poke(src, dst, tk[3], tk[0], tk[1], tk[2], note, nm);
+    if (r == 0) {
+        char lg[300];
+        snprintf(lg, sizeof(lg), "POKE %.60s %.60s %.20s %.10s %.20s -> %.80s\n", zip, tk[3], tk[0], tk[1], tk[2], dst);
+        log_change(lg);
+    }
+    return r == 0;
+}
+
 int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
     load();
     const char* args;
@@ -389,6 +438,20 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
             snprintf(lg, sizeof(lg), "GUARDADO %s\n", fnote);
             log_change(lg);
         }
+        int pk = 0;
+        if (last_ai && last_ai[0]) {   // a "/poke ..." line of the answer (a saved game edit)
+            for (const char* l = last_ai; *l; l++) {
+                if (l != last_ai && l[-1] != '\n') continue;
+                const char* q = l;
+                while (*q == ' ' || *q == '`') q++;
+                if (!strncmp(q, "/poke ", 6)) {
+                    pk = do_poke(q + 6, note, nm);
+                    if (!pk && !note[0]) snprintf(note, nm, "The /poke line of the answer could not be run.");
+                    return 0;
+                }
+            }
+        }
+        (void)pk;
         if (nb == 0 && nf == 0) snprintf(note, nm, "The last answer has no edit blocks (BUSCAR / REEMPLAZAR) and no named files (\"Archivo: path\" with a code block under it).");
         else snprintf(note, nm, "%d edit(s) applied, %d failed; %d file(s) saved (files in %s, log in CAMBIOS.txt):\n%.600s%s%.600s", ok, bad, nf, OUT_DIR, rep, nf ? "\n" : "", fnote);
     } else if (c <= 9) {   // /empaquetar
@@ -444,6 +507,8 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
         int n = ws_context_text(ctx, sizeof(ctx));
         if (n > 0) pend("[Proyecto]", ctx, n);
         snprintf(note, nm, "Instructions of %s saved (%d chars). They go with your next message; a new chat (Triangle) puts them in the system prompt.", ws_name(), (int)strlen(ins));
+    } else if (c == 17 || c == 18) {   // /poke
+        do_poke(args, note, nm);
     } else {   // /limite
         if (args[0]) {
             g_limit = atoi(args);
@@ -558,5 +623,11 @@ const char* devcmd_system_prompt(void) {
            "- No inventes cómo funciona esta app ni sus comandos: si no lo viste, dilo (la lista está en /ayuda).\n"
            "- Si la app dice que un bloque falló, reenvía solo ese, copiando el texto que ella te muestra. Si avisa de que las llaves no cuadran, revisa tu último bloque.\n"
            "- Si el mensaje empieza con [REINICIO], el contexto se reinició: sigue desde TUS NOTAS sin repetir lo hecho.\n"
-           "- Si algo llegó cortado, avisa.\n";
+           "- Si algo llegó cortado, avisa.\n"
+           "\n"
+           "PARTIDAS GUARDADAS Y ARCHIVOS BINARIOS (no son texto: no inventes su contenido)\n"
+           "- No lees bytes ni calculas: la app lo hace. @zip lista todo el zip; @zip:archivo da un informe; @zip:archivo:0x100-0x1ff, el hex de un rango con su valor como número; @zip?=12500, dónde está ese número en todos los archivos; @antes.zip~despues.zip, qué bytes cambiaron.\n"
+           "- Para cambiar un valor (dinero, vidas...): 1) pide al usuario el valor actual y busca @zip?=VALOR; 2) si sale en varios sitios, que lo cambie en el juego, guarde otra partida y compara @antes.zip~despues.zip: el desplazamiento que pasó del valor viejo al nuevo es el bueno; 3) termina con UNA línea sola: /poke OFFSET TIPO VALOR ARCHIVO (ej. /poke 0x40 u32 999999 SAVEDATA/slot0.dat). El usuario escribe /aplicar y la app crea nombre-mod.zip; el original no se toca.\n"
+           "- TIPO: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64; usa el que la app halló (u32le = u32). Si el informe dice que los bytes parecen aleatorios (cifrado o comprimido), dilo: no se puede editar así.\n"
+           "- Cambios pequeños junto al valor (suma de comprobación, contador) pueden hacer que el juego rechace la partida: avisa y no prometas que funcione.\n";
 }

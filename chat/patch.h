@@ -34,7 +34,7 @@ int patch_parse(const char* text, PatchBlock* out, int max);
 int patch_has_blocks(const char* text);
 
 // Applies one block to the file content in buf (len bytes now, cap bytes of room, NUL-terminated at buf[len]).
-// Returns 0 = applied (*len updated; *line = first changed line, *how = "exact", "spaces" or "indent"),
+// Returns 0 = applied (*len updated; *line = first changed line, *how = "exact", "spaces", "indent" or "typo": one line of the search had a mistyped character),
 //        -1 = the text was not found (hint gets the lines of the file that look most like it),
 //        -2 = it matches in several places (add more lines around it), -3 = no room, -4 = empty search on existing text.
 int patch_apply(char* buf, int* len, int cap, const PatchBlock* b, int file_exists, int* line, const char** how, char* hint, int hint_max);

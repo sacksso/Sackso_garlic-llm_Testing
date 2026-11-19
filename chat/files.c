@@ -1,6 +1,7 @@
 // Text files for the chat (see files.h).
 #include "files.h"
 #include "zipread.h"
+#include "bintools.h"
 #include "repomap.h"
 
 #include <dirent.h>
@@ -14,7 +15,7 @@
 #define NAME_MAX_LEN 96
 
 static int ok_name_char(unsigned char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '*' || c == '#' || c == '?' || c == '+' || c == '=' || c == '~';
 }
 
 static int cmp(const void* a, const void* b) { return strcmp((const char*)a, (const char*)b); }
@@ -248,11 +249,40 @@ static int zip_key_files(const char* path, const ZipEnt* ents, int n, int tl, ch
     return o;
 }
 
+// A number of a range: decimal or 0x hex (offsets of binary files are usually written in hex).
+static const char* num_at(const char* q, long* v) {
+    long long x = 0;
+    if (q[0] == '0' && (q[1] == 'x' || q[1] == 'X') && ((q[2] >= '0' && q[2] <= '9') || (q[2] >= 'a' && q[2] <= 'f') || (q[2] >= 'A' && q[2] <= 'F'))) {
+        q += 2;
+        for (;; q++) {
+            int d = *q >= '0' && *q <= '9' ? *q - '0' : *q >= 'a' && *q <= 'f' ? *q - 'a' + 10 : *q >= 'A' && *q <= 'F' ? *q - 'A' + 10 : -1;
+            if (d < 0 || x > (1LL << 40)) break;
+            x = x * 16 + d;
+        }
+    } else
+        while (*q >= '0' && *q <= '9' && x < (1LL << 40)) x = x * 10 + (*q++ - '0');
+    *v = (long)x;
+    return q;
+}
+
 // @repo.zip (the file list), @repo.zip:dir/ or @repo.zip:*.yml (a part of the list), @repo.zip:path/file (one file),
 // and @doc.docx / .pptx / .xlsx / .odt / .ods / .odp (the text of the document).
 // Returns the text length, or -2 when name is a plain file (not one of these), -1 not found, -3 several files match
 // (out holds their names), -4 binary, -5 damaged or unsupported.
 static int read_special(const char* name, char* out, int max, long* size, int* cut) {
+    {   // phase 10: @before.zip~after.zip = which bytes changed between two saves
+        const char* tl = strchr(name, '~');
+        if (tl && !strchr(name, ':') && !strchr(name, '?')) {
+            char pa[200], pb[200];
+            snprintf(pa, sizeof(pa), FILES_DIR "/%.*s", (int)(tl - name), name);
+            snprintf(pb, sizeof(pb), FILES_DIR "/%s", tl + 1);
+            *cut = 0;
+            int r = bin_zip_compare(pa, pb, out, max);
+            if (r < 0) return -5;
+            *size = r;
+            return r;
+        }
+    }
     char base[NAME_MAX_LEN];
     const char* colon = strpbrk(name, ":?");
     int bl = colon ? (int)(colon - name) : (int)strlen(name);
@@ -280,6 +310,24 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
     if (n < 0) return -5;
     int sl = spec ? (int)strlen(spec) : 0;
     g_last_rel[0] = 0;
+    if (is_query && spec[0] == '=') {   // phase 10: @save.zip?=12500 = where that number is stored, in every file
+        int r = bin_zip_find(path, NULL, spec + 1, out, max);
+        if (r == -2) r = snprintf(out, max, "\"%s\" is not a number (use 12500, -3, 0x1F4 or 12.5).\n", spec + 1);
+        if (r < 0) return -5;
+        *size = r;
+        return r;
+    }
+    if (!is_query && spec && strstr(spec, "?=")) {   // @save.zip:file?=12500: the same, in one file
+        char fl[ZIP_NAME_MAX + 8];
+        const char* qe = strstr(spec, "?=");
+        snprintf(fl, sizeof(fl), "%.*s", (int)(qe - spec), spec);
+        int r = bin_zip_find(path, fl, qe + 2, out, max);
+        if (r == -2) r = snprintf(out, max, "\"%s\" is not a number (use 12500, -3, 0x1F4 or 12.5).\n", qe + 2);
+        else if (r == -3) r = snprintf(out, max, "%s is not in the zip (see the list with @%.60s).\n", fl, base);
+        if (r < 0) return -5;
+        *size = r;
+        return r;
+    }
     if (is_query) {   // @repo.zip?word1+word2: the parts of the repo that mention them (phase 7)
         int r = repo_search(path, spec, out, max < 9000 ? max : 9000, 3, NULL, NULL);
         if (r < 0) return -5;
@@ -294,6 +342,14 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         if (m > 0 && nsrc > 0) {
             int tl2 = repo_root_len(ents, n);
             int o = zip_key_files(path, ents, n, tl2, out, m, max, 1500, 1, 1800);
+            {   // phase 10: a small zip whose map leaves binary files out (a saved game): add every file with its size
+                const char* bn = strstr(out, "binary or assets not listed");
+                int has_bin = bn && bn - out > 3 && !(bn[-2] == '0' && !(bn[-3] >= '0' && bn[-3] <= '9'));
+                if (has_bin && n <= 80 && o < max - 300) {
+                    o += snprintf(out + o, max - o, "\nAll %d files (size, path; the ones without text are binary: @%.60s:path gives a report, @%.60s?=NUMBER finds a number in all of them):\n", n, base, base);
+                    for (int i = 0; i < n && o < max - 140; i++) o += snprintf(out + o, max - o, "%u %s\n", (unsigned)ents[i].usize, ents[i].name + tl2);
+                }
+            }
             *size = o;
             if (n < total) *cut = 1;
             return o;
@@ -308,8 +364,11 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
                 if (strncmp(ents[i].name, ents[0].name, tl)) tl = 0;
         }
         int o = snprintf(out, max, "%s: %d files%s%.*s\n", base, total, tl ? ", paths inside " : "", tl, ents[0].name);
-        int shown = 0, hidden = 0;
+        int shown = 0, hidden = 0, show_all = 0;
         int lim = sl ? max : (max < 4500 ? max : 4500);   // a whole-zip list stays short: the user narrows it with dir/
+        int o0 = o;
+    relist:
+        o = o0, shown = 0, hidden = 0;
         for (int i = 0; i < n; i++) {
             const char* nm = ents[i].name;
             const char* rel = nm + tl;
@@ -318,7 +377,7 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
                     if (!ends_ci(nm, spec + 1)) continue;
                 } else if (!starts_with(rel, spec) && !starts_with(nm, spec)) continue;
             }
-            if (spec == NULL || spec[0] != '*') {   // images, models, archives... are hidden unless asked with *.ext
+            if (!show_all && (spec == NULL || spec[0] != '*')) {   // images, models, archives... are hidden unless asked with *.ext
                 static const char* const ASSET[] = {".bin", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".idx", ".npy", ".prx", ".sprx", ".pkg", ".elf", ".oelf", ".zip", ".gz", ".xz", ".7z", ".mp3", ".mp4", ".ogg", ".wav", ".ttf", ".otf", ".woff", ".woff2", ".pdf", ".so", ".dll", ".exe", ".o", ".a", ".pyc", ".sfo", NULL};
                 int asset = 0;
                 for (int k = 0; ASSET[k] && !asset; k++) asset = ends_ci(nm, ASSET[k]);
@@ -334,6 +393,11 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
             }
             o += w, shown++;
         }
+        if (!show_all && sl == 0 && hidden > 0 && (shown == 0 || n <= 60)) {   // phase 10: a saved game is ALL binary: list it all
+            show_all = 1;
+            goto relist;
+        }
+        if (show_all && o < max - 260) o += snprintf(out + o, max - o, "(binary files are in this list: @%.60s:path gives a report of one, @%.60s:path:0x0-0xff its bytes in hex, @%.60s?=NUMBER finds a number in all of them.)\n", base, base, base);
         if (hidden && o < max - 120) o += snprintf(out + o, max - o, "(+%d binary files not listed; @%.60s:*.bin etc. lists them)\n", hidden, base);
         if (n < total) *cut = 1;
         if (sl && shown == 0 && !hidden) return -1;
@@ -342,7 +406,7 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         return o;
     }
     char fspec[ZIP_NAME_MAX + 8], sym[64] = "";
-    int ra = 0, rb = 0;
+    int ra = 0, rb = 0, ranged = 0;
     snprintf(fspec, sizeof(fspec), "%s", spec);
     {
         char* hash = strchr(fspec, '#');
@@ -352,18 +416,19 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         } else {      // @zip:path:A-B  or  @zip:path:A
             char* c2 = strrchr(fspec, ':');
             if (c2 && c2[1] >= '0' && c2[1] <= '9') {
-                char* q = c2 + 1;
-                ra = 0;
-                while (*q >= '0' && *q <= '9') ra = ra * 10 + (*q++ - '0');
-                rb = ra;
+                long a1 = 0, b1 = 0;
+                const char* q = num_at(c2 + 1, &a1);
+                b1 = a1;
                 if (*q == '-') {
                     q++;
-                    rb = 0;
-                    while (*q >= '0' && *q <= '9') rb = rb * 10 + (*q++ - '0');
-                    if (rb == 0) rb = 1 << 29;
+                    if (*q) q = num_at(q, &b1);
+                    else b1 = 0;
+                    if (b1 == 0) b1 = 1 << 29;
                 }
-                if (*q == 0) *c2 = 0;
-                else ra = rb = 0;
+                if (*q == 0) {
+                    *c2 = 0;
+                    ra = (int)a1, rb = (int)b1, ranged = 1;
+                }
             }
         }
         if (!fspec[0]) return -1;
@@ -400,6 +465,17 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
     {   // remember where it is (for the repo search and the edits), without the repo-main/ folder
         int tl3 = repo_root_len(ents, n);
         snprintf(g_last_rel, sizeof(g_last_rel), "%s", hit->name + tl3);
+    }
+    {   // phase 10: a binary file is not shown as text: a report, or the hex of a byte range (@zip:file:0x100-0x1ff)
+        unsigned char probe[512];
+        int pc = 0, pr = zip_read(path, hit, (char*)probe, sizeof(probe) - 1, &pc);
+        if (pr > 0 && bin_looks_binary(probe, pr)) {
+            int bo = bin_entry_view(path, hit, ra, rb, ranged, out, max);
+            *size = hit->usize;
+            *cut = 0;
+            g_att_a = g_att_b = 0;
+            return bo;
+        }
     }
     if (ra > 0 || sym[0]) {   // part of a file: read it whole (up to 200 KB) and cut the lines out
         static char big[200001];
@@ -485,6 +561,20 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         long size = 0;
         char shown[NAME_MAX_LEN + 8];   // what the note and the header call it
         strcpy(shown, name);
+        if (strchr(name, '~') && !strchr(name, ':') && !strchr(name, '?')) {   // phase 10: @before.zip~after.zip
+            char za[NAME_MAX_LEN], zb[NAME_MAX_LEN], sg[300];
+            char* tl = strchr(name, '~');
+            snprintf(za, sizeof(za), "%.*s", (int)(tl - name), name);
+            snprintf(zb, sizeof(zb), "%s", tl + 1);
+            int ha = resolve_base(za, sg, sizeof(sg)), hb = resolve_base(zb, sg, sizeof(sg));
+            if (ha < 0 || hb < 0 || !strcasecmp(za, zb)) {
+                note_add(note, note_max, "@%s: needs two different zips that exist (the one from before and the one from after). ", name, 0);
+                continue;
+            }
+            snprintf(name, sizeof(name), "%.90s~%.90s", za, zb);
+            snprintf(shown, sizeof(shown), "%s", name);
+            strcpy(last_zip, zb);
+        } else
         {   // phase 6: "@zip", "@:path", a name start, or a typo of a file name
             char* colon = strpbrk(name, ":?");
             char base[NAME_MAX_LEN], rest[NAME_MAX_LEN];

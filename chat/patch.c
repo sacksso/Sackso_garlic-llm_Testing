@@ -178,6 +178,31 @@ static int line_eq(const char* a, int al, const char* b, int bl, int mode) {
     return al == bl && !memcmp(a, b, al);
 }
 
+// phase 10: the same line with one or two mistyped characters ("ln" for "in"): a small model copies text almost, not
+// exactly. Only long lines (short ones differ by meaning: a = 1 / a = 2), ignoring the indentation.
+static int near_line(const char* a, int al, const char* b, int bl) {
+    al = rtrim_len(a, al), bl = rtrim_len(b, bl);
+    int x = ltrim_off(a, al), y = ltrim_off(b, bl);
+    a += x, al -= x, b += y, bl -= y;
+    if (al < 14 || bl < 14 || al > 200 || bl > 200 || (al > bl ? al - bl : bl - al) > 2) return 0;
+    int prev[202], cur[202];
+    for (int j = 0; j <= bl; j++) prev[j] = j;
+    for (int i = 1; i <= al; i++) {
+        cur[0] = i;
+        int best = cur[0];
+        for (int j = 1; j <= bl; j++) {
+            int c = prev[j - 1] + (a[i - 1] != b[j - 1]);
+            if (prev[j] + 1 < c) c = prev[j] + 1;
+            if (cur[j - 1] + 1 < c) c = cur[j - 1] + 1;
+            cur[j] = c;
+            if (c < best) best = c;
+        }
+        if (best > 2) return 0;
+        memcpy(prev, cur, sizeof(int) * (bl + 1));
+    }
+    return prev[bl] <= 2;
+}
+
 static void hint_for(const char* buf, int nfl, const char* search, int slen, char* hint, int hint_max) {
     if (!hint || hint_max < 40) return;
     hint[0] = 0;
@@ -284,11 +309,18 @@ int patch_apply(char* buf, int* len, int cap, const PatchBlock* b, int file_exis
     int snl = split_lines(b->search, b->slen, sl, 2000);
     while (snl > 0 && rtrim_len(b->search + sl[snl - 1].start, sl[snl - 1].len) == 0) snl--;   // trailing blank lines of the search
     if (snl == 0) return -1;
-    for (int mode = 1; mode <= 2; mode++) {
+    for (int mode = 1; mode <= 3; mode++) {   // 3: every line equal ignoring indentation but ONE with a typo
         int hits = 0, hit_at = -1;
         for (int i = 0; i + snl <= nfl; i++) {
-            int ok = 1;
-            for (int j = 0; j < snl && ok; j++) ok = line_eq(buf + fl[i + j].start, fl[i + j].len, b->search + sl[j].start, sl[j].len, mode);
+            int ok = 1, bad = 0;
+            for (int j = 0; j < snl && ok; j++) {
+                const char* fa = buf + fl[i + j].start;
+                const char* sb = b->search + sl[j].start;
+                if (line_eq(fa, fl[i + j].len, sb, sl[j].len, mode == 3 ? 2 : mode)) continue;
+                if (mode == 3 && bad == 0 && near_line(fa, fl[i + j].len, sb, sl[j].len)) bad = 1;
+                else ok = 0;
+            }
+            if (mode == 3 && bad == 0) ok = 0;   // (an exact match was already tried)
             if (ok) {
                 hits++;
                 if (hit_at < 0) hit_at = i;
@@ -305,7 +337,7 @@ int patch_apply(char* buf, int* len, int cap, const PatchBlock* b, int file_exis
             int rl = b->rlen;
             if (rl > (int)sizeof(rep) - 2) return -3;
             int delta = 0;
-            if (mode == 2) {
+            if (mode >= 2) {
                 int fi = hit_at, si = 0;
                 while (si < snl && rtrim_len(b->search + sl[si].start, sl[si].len) == ltrim_off(b->search + sl[si].start, sl[si].len)) si++, fi++;
                 if (si < snl) delta = indent_of(buf + fl[fi].start, fl[fi].len) - indent_of(b->search + sl[si].start, sl[si].len);
@@ -332,7 +364,7 @@ int patch_apply(char* buf, int* len, int cap, const PatchBlock* b, int file_exis
                 i += (e ? (int)(e - (b->repl + i)) : rl - i) + (e ? 1 : 0);
             }
             *line = hit_at + 1;
-            *how = mode == 1 ? "spaces" : "indent";
+            *how = mode == 1 ? "spaces" : mode == 2 ? "indent" : "typo";
             return splice(buf, len, cap, from, to, rep, ro, crlf);
         }
     }
