@@ -1,10 +1,13 @@
 // Binary tools (see bintools.h).
 #include "bintools.h"
 
+#include "bitscan.h"
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 // ---- small helpers ---------------------------------------------------------------------------------------------
@@ -70,12 +73,12 @@ static unsigned u16le(const unsigned char* p) { return p[0] | p[1] << 8; }
 static unsigned u32le(const unsigned char* p) { return p[0] | p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24; }
 static unsigned long long u64le(const unsigned char* p) { return (unsigned long long)u32le(p) | (unsigned long long)u32le(p + 4) << 32; }
 
-static int hexlines(const unsigned char* d, long n, long a, long b, char* out, int max) {
+static int hexlines(const unsigned char* d, long n, long a, long b, char* out, int max, long base) {
     long s = a & ~15L, e = b | 15L;
     if (e >= n) e = n - 1;
     int o = 0;
     for (long row = s; row <= e && o < max - 100; row += 16) {
-        o += snprintf(out + o, max - o, "%08lX ", row);
+        o += snprintf(out + o, max - o, "%08lX ", row + base);
         for (int k = 0; k < 16; k++) {
             if (row + k < n) o += snprintf(out + o, max - o, " %02X", d[row + k]);
             else o += snprintf(out + o, max - o, "   ");
@@ -89,8 +92,8 @@ static int hexlines(const unsigned char* d, long n, long a, long b, char* out, i
 }
 
 // What the bytes at p can mean as numbers (the model cannot compute these).
-static int meaning(const unsigned char* d, long n, long at, char* out, int max) {
-    int o = snprintf(out, max, "At 0x%lX: u8=%u", at, d[at]);
+static int meaning(const unsigned char* d, long n, long at, char* out, int max, long base) {
+    int o = snprintf(out, max, "At 0x%lX: u8=%u", at + base, d[at]);
     if (at + 2 <= n) o += snprintf(out + o, max - o, "  u16le=%u", u16le(d + at));
     if (at + 4 <= n) {
         unsigned u = u32le(d + at);
@@ -133,6 +136,34 @@ static int distinct_bytes(const unsigned char* d, long n) {
 }
 
 int bin_entry_view(const char* zip, const ZipEnt* e, long a, long b, int ranged, char* out, int max) {
+    if ((long)e->usize > BITS_BIG) {   // phase 13: a big file (a saved game): from the cache file, whatever its size
+        char raw[200];
+        if (bits_raw(zip, e, raw, sizeof(raw)) < 0) return snprintf(out, max, "Cannot read %s (damaged or unsupported).\n", e->name);
+        if (!ranged) return bits_report(raw, e->name, out, max);
+        if (b < a) b = a;
+        if (a >= (long)e->usize) return snprintf(out, max, "%s has %ld bytes: offset 0x%lX is past the end.\n", e->name, (long)e->usize, a);
+        int clipped = b - a > 511;
+        if (clipped) b = a + 511;
+        long a0 = a & ~15L;
+        unsigned char win[560];
+        int f = open(raw, O_RDONLY), got = 0;
+        if (f >= 0) {
+            if (lseek(f, a0, SEEK_SET) >= 0) {
+                int want = (int)(b - a0 + 16 < (long)sizeof(win) ? b - a0 + 16 : (long)sizeof(win));
+                while (got < want) {
+                    int r = read(f, win + got, want - got);
+                    if (r <= 0) break;
+                    got += r;
+                }
+            }
+            close(f);
+        }
+        if (got <= 0) return snprintf(out, max, "Cannot read %s at 0x%lX.\n", e->name, a);
+        int o = snprintf(out, max, "%s, bytes 0x%lX-0x%lX of %ld%s:\n", e->name, a, b < a0 + got ? b : a0 + got - 1, (long)e->usize, clipped ? " (range cut to 512 bytes)" : "");
+        o += hexlines(win, got, a - a0, b - a0, out + o, max - o, a0);
+        if (o < max - 260) o += meaning(win, got, a - a0, out + o, max - o, a0);
+        return o;
+    }
     long n = 0;
     int cut = 0;
     unsigned char* d = load_entry(zip, e, &n, &cut);
@@ -148,8 +179,8 @@ int bin_entry_view(const char* zip, const ZipEnt* e, long a, long b, int ranged,
         int clipped = 0;
         if (b - a > 511) b = a + 511, clipped = 1;
         o += snprintf(out + o, max - o, "%s, bytes 0x%lX-0x%lX of %ld%s:\n", e->name, a, b < n ? b : n - 1, (long)e->usize, clipped ? " (range cut to 512 bytes)" : "");
-        o += hexlines(d, n, a, b, out + o, max - o);
-        if (o < max - 260) o += meaning(d, n, a, out + o, max - o);
+        o += hexlines(d, n, a, b, out + o, max - o, 0);
+        if (o < max - 260) o += meaning(d, n, a, out + o, max - o, 0);
         free(d);
         return o;
     }
@@ -174,7 +205,7 @@ int bin_entry_view(const char* zip, const ZipEnt* e, long a, long b, int ranged,
     }
     if (!random_like) o += snprintf(out + o, max - o, "%s\n", ns ? "" : " (none)");
     o += snprintf(out + o, max - o, "First bytes:\n");
-    o += hexlines(d, n, 0, 159, out + o, max - o);
+    o += hexlines(d, n, 0, 159, out + o, max - o, 0);
     o += snprintf(out + o, max - o,
                   "Next: @zip:%s:0x100-0x1ff (hex of a range) | @zip?=NUMBER (where a number is stored, in every file) | @before.zip~after.zip (what changed between two saves).\n",
                   e->name);
@@ -241,6 +272,40 @@ static int search_one(const unsigned char* d, long n, const char* label, const N
     return o;
 }
 
+// phase 13: the same search in an entry too big to hold in memory: from the cache file, a megabyte at a time.
+static int search_big(const char* zip, const ZipEnt* e, const Needle* nd, int nn, char* out, int max, int* total_hits) {
+    char raw[200];
+    if (bits_raw(zip, e, raw, sizeof(raw)) < 0) return 0;
+    int fd = open(raw, O_RDONLY);
+    if (fd < 0) return 0;
+    enum { CH = 1 << 20 };
+    static unsigned char buf[CH + 16];
+    int hits[8] = {0}, o = 0;
+    long n = (long)e->usize;
+    for (long base = 0; base < n; base += CH) {
+        int want = (int)(n - base < CH + 16 ? n - base : CH + 16), got = 0;
+        if (lseek(fd, base, SEEK_SET) < 0) break;
+        while (got < want) {
+            int r = read(fd, buf + got, want - got);
+            if (r <= 0) break;
+            got += r;
+        }
+        int span = got < CH ? got : CH;   // (the positions that start in this chunk)
+        for (int k = 0; k < nn && k < 8; k++)
+            for (int i = 0; i < span && i + nd[k].len <= got; i++) {
+                if (buf[i] != nd[k].b[0] || memcmp(buf + i, nd[k].b, nd[k].len)) continue;
+                hits[k]++;
+                if (hits[k] <= 8 && o < max - 120) o += snprintf(out + o, max - o, "  %s 0x%lX %s\n", e->name, base + i, nd[k].name);
+            }
+    }
+    close(fd);
+    for (int k = 0; k < nn && k < 8; k++) {
+        if (hits[k] > 8 && o < max - 120) o += snprintf(out + o, max - o, "  %s: %s matches %d times (only 8 shown: the number is too common; use the exact number the game shows)\n", e->name, nd[k].name, hits[k]);
+        *total_hits += hits[k];
+    }
+    return o;
+}
+
 int bin_zip_find(const char* zip, const char* file, const char* value, char* out, int max) {
     const ZipEnt* ents;
     int total;
@@ -260,6 +325,13 @@ int bin_zip_find(const char* zip, const char* file, const char* value, char* out
     for (int i = 0; i < n && o < max - 200; i++) {
         if (one && &ents[i] != one) continue;
         if (ents[i].usize == 0) continue;
+        if (ents[i].usize > BITS_BIG) {
+            scanned++;
+            int before = hits;
+            o += search_big(zip, &ents[i], nd, nn, out + o, max - o, &hits);
+            if (hits > before) files_hit++;
+            continue;
+        }
         long len = 0;
         int cut = 0;
         unsigned char* d = load_entry(zip, &ents[i], &len, &cut);
@@ -277,7 +349,9 @@ int bin_zip_find(const char* zip, const char* file, const char* value, char* out
 
 // ---- compare two saves -----------------------------------------------------------------------------------------
 
-int bin_zip_compare(const char* za, const char* zb, char* out, int max) {
+int bin_zip_compare(const char* za, const char* zb, char* out, int max) { return bin_zip_compare_hint(za, zb, NULL, out, max); }
+
+int bin_zip_compare_hint(const char* za, const char* zb, const char* hint, char* out, int max) {
     const ZipEnt *ea, *eb;
     int ta, tb;
     int na = zip_open_dir(za, &ea, &ta);
@@ -299,6 +373,18 @@ int bin_zip_compare(const char* za, const char* zb, char* out, int max) {
             if (!strcmp(eb[k].name, A[i].name)) b = &eb[k];
         if (!b) {
             o += snprintf(out + o, max - o, "%s: only in the first zip.\n", A[i].name);
+            continue;
+        }
+        if (A[i].usize > BITS_BIG || b->usize > BITS_BIG) {   // phase 13: a big file: read as bit fields, from the cache files
+            char ra[200], rb[200];
+            if (bits_raw(za, &A[i], ra, sizeof(ra)) < 0 || bits_raw(zb, b, rb, sizeof(rb)) < 0) {
+                o += snprintf(out + o, max - o, "%s: cannot be read.\n", A[i].name);
+                continue;
+            }
+            int o0 = o;
+            o += bits_diff(ra, rb, A[i].name, hint, out + o, max - o);
+            if (strstr(out + o0, "no byte differs")) o = o0, same++;
+            else changed++;
             continue;
         }
         long l1 = 0, l2 = 0;
@@ -434,6 +520,28 @@ static int encode(const char* type, const char* value, unsigned char* b, int* le
     return 0;
 }
 
+// phase 13: a poke in an entry bigger than BIN_MAX: through the cache file, writing the new zip as a stream.
+static int poke_big(const char* src, const char* dst, const ZipEnt* t, long long off, const unsigned char* nb, int nlen, char* msg, int msg_max) {
+    char raw[200], patched[230], why[300];
+    if (bits_raw(src, t, raw, sizeof(raw)) < 0) return snprintf(msg, msg_max, "Cannot read %s (damaged or unsupported).", t->name), -1;
+    unsigned char old[8] = {0};
+    int f = open(raw, O_RDONLY);
+    if (f >= 0) {
+        if (lseek(f, (off_t)off, SEEK_SET) >= 0 && read(f, old, nlen) != nlen) memset(old, 0, sizeof(old));
+        close(f);
+    }
+    snprintf(patched, sizeof(patched), "%s.patched", raw);
+    if (bits_patch_bytes(raw, patched, (long)off, nb, nlen)) return snprintf(msg, msg_max, "Cannot write the patched copy (disk full?)."), -1;
+    int r = bits_zip_replace(src, dst, t->name, patched, why, sizeof(why));
+    unlink(patched);
+    if (r) return snprintf(msg, msg_max, "%s", why), -1;
+    char ohex[24] = "", nhex[24] = "";
+    for (int i = 0; i < nlen; i++) snprintf(ohex + i * 3, 4, "%02X ", old[i]), snprintf(nhex + i * 3, 4, "%02X ", nb[i]);
+    const char* base = strrchr(dst, '/') ? strrchr(dst, '/') + 1 : dst;
+    snprintf(msg, msg_max, "Done: %s at 0x%llX: %s-> %s. New zip %s (the original is untouched). Test it on the console; keep your backup.", t->name, off, ohex, nhex, base);
+    return 0;
+}
+
 int bin_poke(const char* src, const char* dst, const char* entry, const char* offs, const char* type, const char* value, char* msg, int msg_max) {
     long long off;
     unsigned char nb[8];
@@ -461,6 +569,11 @@ int bin_poke(const char* src, const char* dst, const char* entry, const char* of
     if (!target) {
         free(E), free(R);
         return snprintf(msg, msg_max, "%s is not in the zip.", entry), -1;
+    }
+    if ((long)E[tidx].usize > BIN_MAX && off + nlen <= (long long)E[tidx].usize) {
+        int r = poke_big(src, dst, &E[tidx], off, nb, nlen, msg, msg_max);
+        free(E), free(R);
+        return r;
     }
     if (off + nlen > (long long)E[tidx].usize || (long)E[tidx].usize > BIN_MAX) {
         int r = snprintf(msg, msg_max, "Offset 0x%llX + %d bytes is outside %s (%u bytes)%s.", off, nlen, E[tidx].name, (unsigned)E[tidx].usize, (long)E[tidx].usize > BIN_MAX ? ", and files over 6 MB are not supported" : "");
@@ -554,3 +667,74 @@ int bin_poke(const char* src, const char* dst, const char* entry, const char* of
     free(E);
     return ok ? 0 : (r > 0 ? -1 : -1);
 }
+
+// ---- phase 13: bit fields, checksums and big files ----------------------------------------------------------------
+
+// The entry `name` of a zip, extracted to the cache. 0 on success; -1 zip not readable, -3 no such file, -4 cannot extract.
+static int entry_raw(const char* zip, const char* name, ZipEnt* t, char* raw, int rawmax) {
+    const ZipEnt* ents;
+    int total;
+    int n = zip_open_dir(zip, &ents, &total);
+    if (n < 0) return -1;
+    const ZipEnt* f = find_entry(ents, n, name);
+    if (!f) return -3;
+    *t = *f;
+    return bits_raw(zip, t, raw, rawmax) < 0 ? -4 : 0;
+}
+
+int bin_zip_bits(const char* zip, const char* file, const char* spec, char* out, int max) {
+    ZipEnt t;
+    char raw[200];
+    int r = entry_raw(zip, file, &t, raw, sizeof(raw));
+    if (r < 0) return r;
+    return bits_find(raw, t.name, spec, out, max);
+}
+
+int bin_checksum(const char* zip, const char* file, const char* off, char* out, int max) {
+    long long v;
+    if (!bin_parse_num(off, &v) || v < 0) return -2;
+    ZipEnt t;
+    char raw[200];
+    int r = entry_raw(zip, file, &t, raw, sizeof(raw));
+    if (r < 0) return r;
+    return bits_checksum(raw, (long)v, out, max);
+}
+
+int bin_pokebits(const char* src, const char* dst, const char* entry, const char* where, const char* width, const char* value, const char* order, char* msg, int msg_max) {
+    char wh[64];
+    snprintf(wh, sizeof(wh), "%s", where);
+    char* colon = strchr(wh, ':');
+    long long off = 0, w = 0, v = 0;
+    int bit = 0;
+    if (colon) {
+        *colon = 0;
+        long long b;
+        if (!bin_parse_num(colon + 1, &b) || b < 0 || b > 7) return snprintf(msg, msg_max, "Bad bit \"%s\" (0..7, counted as the order says).", colon + 1), -1;
+        bit = (int)b;
+    }
+    if (!bin_parse_num(wh, &off) || off < 0) return snprintf(msg, msg_max, "Bad offset \"%s\" (use 0x3A41F:5, the byte and the bit).", where), -1;
+    if (!bin_parse_num(width, &w) || w < 1 || w > 64) return snprintf(msg, msg_max, "Bad width \"%s\" (1 to 64 bits).", width), -1;
+    if (!bin_parse_num(value, &v) || v < 0) return snprintf(msg, msg_max, "Bad value \"%s\" (a whole number, 0 or more).", value), -1;
+    int msb = !strcasecmp(order, "msb");
+    if (!msb && strcasecmp(order, "lsb")) return snprintf(msg, msg_max, "Bad order \"%s\" (lsb or msb).", order), -1;
+    if (!strcmp(src, dst)) return snprintf(msg, msg_max, "Refusing to overwrite the original."), -1;
+    ZipEnt t;
+    char raw[200], patched[230], why[300];
+    int r = entry_raw(src, entry, &t, raw, sizeof(raw));
+    if (r == -1) return snprintf(msg, msg_max, "Cannot read %s.", src), -1;
+    if (r == -3) return snprintf(msg, msg_max, "%s is not in the zip.", entry), -1;
+    if (r < 0) return snprintf(msg, msg_max, "Cannot read %s (damaged or unsupported).", entry), -1;
+    snprintf(patched, sizeof(patched), "%s.patched", raw);
+    unsigned long long old = 0;
+    r = bits_patch(raw, patched, (long)off, bit, (int)w, (unsigned long long)v, msb, &old);
+    if (r == -2) return snprintf(msg, msg_max, "%lld does not fit in %lld bits.", v, w), -1;
+    if (r == -3) return snprintf(msg, msg_max, "Offset 0x%llX is outside %s (%u bytes).", off, t.name, (unsigned)t.usize), -1;
+    if (r) return snprintf(msg, msg_max, "Cannot write the patched copy (disk full?)."), -1;
+    r = bits_zip_replace(src, dst, t.name, patched, why, sizeof(why));
+    unlink(patched);
+    if (r) return snprintf(msg, msg_max, "%s", why), -1;
+    const char* base = strrchr(dst, '/') ? strrchr(dst, '/') + 1 : dst;
+    snprintf(msg, msg_max, "Done: %s, %lld bits (%s) at byte 0x%llX bit %d: %llu -> %lld. New zip %s (the original is untouched). Test it on the console; keep your backup. If the game rejects it, a checksum may need fixing: /checksum.", t.name, w, msb ? "MSB-first" : "LSB-first", off, bit, old, v, base);
+    return 0;
+}
+

@@ -272,12 +272,14 @@ static const char* num_at(const char* q, long* v) {
 static int read_special(const char* name, char* out, int max, long* size, int* cut) {
     {   // phase 10: @before.zip~after.zip = which bytes changed between two saves
         const char* tl = strchr(name, '~');
-        if (tl && !strchr(name, ':') && !strchr(name, '?') && !strchr(name, '!')) {
-            char pa[200], pb[200];
+        const char* qm = tl ? strchr(tl, '?') : NULL;   // phase 13: @before.zip~after.zip?5000/5100 (the values the game showed)
+        if (tl && !strchr(name, ':') && !strchr(name, '!') && (!strchr(name, '?') || strchr(name, '?') > tl)) {
+            char pa[200], pb[200], hint[48] = "";
             snprintf(pa, sizeof(pa), FILES_DIR "/%.*s", (int)(tl - name), name);
-            snprintf(pb, sizeof(pb), FILES_DIR "/%s", tl + 1);
+            snprintf(pb, sizeof(pb), FILES_DIR "/%.*s", qm ? (int)(qm - tl - 1) : (int)strlen(tl + 1), tl + 1);
+            if (qm) snprintf(hint, sizeof(hint), "%s", qm + 1);
             *cut = 0;
-            int r = bin_zip_compare(pa, pb, out, max);
+            int r = bin_zip_compare_hint(pa, pb, hint[0] ? hint : NULL, out, max);
             if (r < 0) return -5;
             *size = r;
             return r;
@@ -321,6 +323,18 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
     if (is_query && spec[0] == '=') {   // phase 10: @save.zip?=12500 = where that number is stored, in every file
         int r = bin_zip_find(path, NULL, spec + 1, out, max);
         if (r == -2) r = snprintf(out, max, "\"%s\" is not a number (use 12500, -3, 0x1F4 or 12.5).\n", spec + 1);
+        if (r < 0) return -5;
+        *size = r;
+        return r;
+    }
+    if (!is_query && spec && strstr(spec, "?bits=")) {   // phase 13: @save.zip:file?bits=12500[+0x3A41F]: the number as a bit field
+        char fl[ZIP_NAME_MAX + 8];
+        const char* qe = strstr(spec, "?bits=");
+        snprintf(fl, sizeof(fl), "%.*s", (int)(qe - spec), spec);
+        int r = bin_zip_bits(path, fl, qe + 6, out, max);
+        if (r == -2) r = snprintf(out, max, "\"%s\" is not a number (use 5000 or 0x1388, up to 4294967295; add +0x3A41F to look only near that offset).\n", qe + 6);
+        else if (r == -3) r = snprintf(out, max, "%s is not in the zip (see the list with @%.60s).\n", fl, base);
+        else if (r == -4) r = snprintf(out, max, "%s cannot be read (damaged or unsupported).\n", fl);
         if (r < 0) return -5;
         *size = r;
         return r;
@@ -479,7 +493,7 @@ static int read_special(const char* name, char* out, int max, long* size, int* c
         int pc = 0, pr = zip_read(path, hit, (char*)probe, sizeof(probe) - 1, &pc);
         if (pr > 0 && bin_looks_binary(probe, pr)) {
             int bo = bin_entry_view(path, hit, ra, rb, ranged, out, max);
-            *size = hit->usize;
+            *size = bo;   // (what is shown is complete: a 15 MB file's report must not say "cut")
             *cut = 0;
             g_att_a = g_att_b = 0;
             return bo;
@@ -569,17 +583,19 @@ int files_expand(const char* text, char* ctx, int ctx_max, char* note, int note_
         long size = 0;
         char shown[NAME_MAX_LEN + 8];   // what the note and the header call it
         strcpy(shown, name);
-        if (strchr(name, '~') && !strchr(name, ':') && !strchr(name, '?')) {   // phase 10: @before.zip~after.zip
-            char za[NAME_MAX_LEN], zb[NAME_MAX_LEN], sg[300];
+        if (strchr(name, '~') && !strchr(name, ':') && (!strchr(name, '?') || strchr(name, '?') > strchr(name, '~'))) {   // phase 10: @before.zip~after.zip (phase 13: ?5000>5100 after it)
+            char za[NAME_MAX_LEN], zb[NAME_MAX_LEN], sg[300], hint[48] = "";
             char* tl = strchr(name, '~');
+            char* qm = strchr(tl, '?');
             snprintf(za, sizeof(za), "%.*s", (int)(tl - name), name);
-            snprintf(zb, sizeof(zb), "%s", tl + 1);
+            snprintf(zb, sizeof(zb), "%.*s", qm ? (int)(qm - tl - 1) : (int)strlen(tl + 1), tl + 1);
+            if (qm) snprintf(hint, sizeof(hint), "%s", qm + 1);
             int ha = resolve_base(za, sg, sizeof(sg)), hb = resolve_base(zb, sg, sizeof(sg));
             if (ha < 0 || hb < 0 || !strcasecmp(za, zb)) {
                 note_add(note, note_max, "@%s: needs two different zips that exist (the one from before and the one from after). ", name, 0);
                 continue;
             }
-            snprintf(name, sizeof(name), "%.90s~%.90s", za, zb);
+            snprintf(name, sizeof(name), "%.90s~%.90s%s%.40s", za, zb, hint[0] ? "?" : "", hint);
             snprintf(shown, sizeof(shown), "%s", name);
             strcpy(last_zip, zb);
         } else

@@ -24,6 +24,17 @@ int zip_open_dir(const char* path, const ZipEnt** ents, int* total);
 // unsupported entry. *cut = 1 when the entry is longer than what was written.
 int zip_read(const char* path, const ZipEnt* e, char* out, int max, int* cut);
 
+// Streaming: the whole uncompressed content of an entry of any size, in pieces, without holding it in memory (only a
+// 32 KB window and two small buffers). sink gets consecutive pieces; it returns nonzero to stop early. Returns the bytes
+// delivered (>= 0; compare with e->usize to know it was complete) or < 0: -1 cannot open, -2 bad local header, -3 damaged
+// stream, -4 unsupported method. Not reentrant (do not call it from the sink).
+typedef int (*ZipSink)(void* ctx, const uint8_t* p, int n);
+long zip_stream(const char* path, const ZipEnt* e, ZipSink sink, void* ctx);
+
+// The whole content of an entry written to the file dst (made, or replaced). 0 on success, < 0 as zip_stream, -5 when the
+// size does not match what the zip says or the disk is full (dst is removed then).
+int zip_extract(const char* path, const ZipEnt* e, const char* dst);
+
 // Text of an office document: docx (word/document.xml), pptx (the slides), xlsx (the sheets, cells split by tabs), odt/ods/odp
 // (content.xml). Returns the text length, or < 0 when path is not one of those or cannot be read. *cut as above.
 int zip_office_text(const char* path, char* out, int max, int* cut);

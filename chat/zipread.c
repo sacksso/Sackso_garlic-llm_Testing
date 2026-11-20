@@ -24,12 +24,54 @@ typedef struct {
     uint8_t* out;
     int outmax, outcnt;
     int err;   // 1: the input ended (what was decoded so far is still good)
+    // streaming (zip_stream): the compressed bytes come from a file in pieces, the output leaves through a sink
+    int stream, fd, fl, stop;   // fl: how much of out was already delivered
+    long frem, total;           // compressed bytes still in the file; bytes delivered
+    uint8_t* ibuf;
+    int ibuf_size;
+    int (*sink)(void*, const uint8_t*, int);
+    void* ctx;
 } St;
+
+// Streaming: the next piece of the compressed data. 1 when there is more input.
+static int refill(St* s) {
+    if (!s->stream || s->frem <= 0) return 0;
+    int want = s->frem < s->ibuf_size ? (int)s->frem : s->ibuf_size;
+    int got = 0;
+    while (got < want) {
+        int r = read(s->fd, s->ibuf + got, want - got);
+        if (r <= 0) break;
+        got += r;
+    }
+    if (got <= 0) return 0;
+    s->in = s->ibuf, s->inlen = got, s->incnt = 0, s->frem -= got;
+    return 1;
+}
+
+// Streaming: the output buffer is full: deliver all but the last 32 KB (the window back references can still use) and
+// move that window to the start. -1 when the sink asked to stop.
+static int slide(St* s) {
+    int upto = s->outcnt > 32768 ? s->outcnt - 32768 : 0;
+    if (upto > s->fl) {
+        int stop = s->sink(s->ctx, s->out + s->fl, upto - s->fl);
+        s->total += upto - s->fl;   // (what the sink got counts even when it then asks to stop)
+        s->fl = upto;
+        if (stop) {
+            s->stop = 1;
+            return -1;
+        }
+    }
+    if (upto > 0) {
+        memmove(s->out, s->out + upto, (size_t)(s->outcnt - upto));
+        s->outcnt -= upto, s->fl -= upto;
+    }
+    return 0;
+}
 
 static int bits(St* s, int need) {
     uint32_t val = s->bitbuf;
     while (s->bitcnt < need) {
-        if (s->incnt >= s->inlen) {
+        if (s->incnt >= s->inlen && !refill(s)) {
             s->err = 1;
             return 0;
         }
@@ -85,7 +127,7 @@ static int codes(St* s, const Huff* lc, const Huff* dc) {
         int sym = decode(s, lc);
         if (sym < 0) return sym;
         if (sym < 256) {
-            if (s->outcnt >= s->outmax) return 1;
+            if (s->outcnt >= s->outmax && (!s->stream || slide(s) < 0)) return 1;
             s->out[s->outcnt++] = (uint8_t)sym;
         } else if (sym == 256) {
             return 0;
@@ -101,7 +143,7 @@ static int codes(St* s, const Huff* lc, const Huff* dc) {
             if (s->err) return -1;
             if (dist > s->outcnt) return -11;
             while (len--) {
-                if (s->outcnt >= s->outmax) return 1;
+                if (s->outcnt >= s->outmax && (!s->stream || slide(s) < 0)) return 1;
                 s->out[s->outcnt] = s->out[s->outcnt - dist];
                 s->outcnt++;
             }
@@ -109,7 +151,38 @@ static int codes(St* s, const Huff* lc, const Huff* dc) {
     }
 }
 
+static int next_byte(St* s) {
+    if (s->incnt >= s->inlen && !refill(s)) {
+        s->err = 1;
+        return -1;
+    }
+    return s->in[s->incnt++];
+}
+
+// A stored block while streaming: the input comes in pieces, the output goes through the window.
+static int stored_stream(St* s) {
+    s->bitbuf = 0;
+    s->bitcnt = 0;
+    int b0 = next_byte(s), b1 = next_byte(s), b2 = next_byte(s), b3 = next_byte(s);
+    if (b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0) return -1;
+    int len = b0 | (b1 << 8), nlen = b2 | (b3 << 8);
+    if (len != (~nlen & 0xffff)) return -2;
+    while (len > 0) {
+        if (s->incnt >= s->inlen && !refill(s)) {
+            s->err = 1;
+            return -1;
+        }
+        if (s->outcnt >= s->outmax && slide(s) < 0) return 1;
+        int n = len < s->inlen - s->incnt ? len : s->inlen - s->incnt;
+        if (n > s->outmax - s->outcnt) n = s->outmax - s->outcnt;
+        memcpy(s->out + s->outcnt, s->in + s->incnt, (size_t)n);
+        s->outcnt += n, s->incnt += n, len -= n;
+    }
+    return 0;
+}
+
 static int stored(St* s) {
+    if (s->stream) return stored_stream(s);
     s->bitbuf = 0;
     s->bitcnt = 0;
     if (s->incnt + 4 > s->inlen) {
@@ -318,6 +391,97 @@ int zip_read(const char* path, const ZipEnt* e, char* out, int max, int* cut) {
     }
     out[n] = 0;
     return n;
+}
+
+static uint8_t sbuf_in[64 * 1024];
+static uint8_t sbuf_out[192 * 1024];
+
+long zip_stream(const char* path, const ZipEnt* e, ZipSink sink, void* ctx) {
+    if (e->method == 0xFFFF) return -4;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    uint8_t lh[30];
+    if (read_at(fd, e->off, lh, 30) != 30 || u32(lh) != 0x04034b50) {
+        close(fd);
+        return -2;
+    }
+    long data = (long)e->off + 30 + u16(lh + 26) + u16(lh + 28);
+    if (lseek(fd, data, SEEK_SET) < 0) {
+        close(fd);
+        return -2;
+    }
+    long total = 0;
+    if (e->method == 0) {   // stored: straight from the file
+        long left = (long)e->usize;
+        while (left > 0) {
+            int want = left < (long)sizeof(sbuf_in) ? (int)left : (int)sizeof(sbuf_in);
+            int got = 0;
+            while (got < want) {
+                int r = read(fd, sbuf_in + got, want - got);
+                if (r <= 0) break;
+                got += r;
+            }
+            if (got <= 0) break;
+            if (sink(ctx, sbuf_in, got)) {
+                total += got;
+                break;
+            }
+            total += got, left -= got;
+            if (got < want) break;
+        }
+        close(fd);
+        return total;
+    }
+    St s;
+    memset(&s, 0, sizeof(s));
+    s.stream = 1, s.fd = fd, s.frem = (long)e->csize, s.ibuf = sbuf_in, s.ibuf_size = (int)sizeof(sbuf_in);
+    s.out = sbuf_out, s.outmax = (int)sizeof(sbuf_out), s.sink = sink, s.ctx = ctx;
+    int last, rc = 0;
+    do {
+        last = bits(&s, 1);
+        int type = bits(&s, 2);
+        if (s.err) break;
+        rc = type == 0 ? stored(&s) : type == 1 ? fixed(&s) : type == 2 ? dynamic(&s) : -20;
+        if (rc != 0) break;
+    } while (!last);
+    close(fd);
+    if (s.stop) return s.total + 0;   // the sink asked to stop: what it got
+    if (rc < 0 && !s.err) return -3;
+    if (s.err && rc >= 0 && !last) return -3;   // the compressed data ended in the middle
+    if (s.outcnt > s.fl && !s.stop) {
+        if (!s.sink(s.ctx, s.out + s.fl, s.outcnt - s.fl)) s.total += s.outcnt - s.fl;
+        else return s.total;
+    }
+    return s.err ? -3 : s.total;
+}
+
+typedef struct {
+    int fd, bad;
+} ExtractCtx;
+
+static int extract_sink(void* ctx, const uint8_t* p, int n) {
+    ExtractCtx* x = (ExtractCtx*)ctx;
+    while (n > 0) {
+        int w = write(x->fd, p, (size_t)n);
+        if (w <= 0) {
+            x->bad = 1;
+            return 1;
+        }
+        p += w, n -= w;
+    }
+    return 0;
+}
+
+int zip_extract(const char* path, const ZipEnt* e, const char* dst) {
+    ExtractCtx x = {open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0666), 0};
+    if (x.fd < 0) return -5;
+    long n = zip_stream(path, e, extract_sink, &x);
+    int closed = close(x.fd);
+    if (n < 0 || x.bad || closed || n != (long)e->usize) {
+        unlink(dst);
+        return n < 0 ? (int)n : -5;
+    }
+    return 0;
 }
 
 static int ends_ci(const char* s, const char* suf) {

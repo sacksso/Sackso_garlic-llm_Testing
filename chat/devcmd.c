@@ -102,7 +102,7 @@ static int word_is(const char* t, int tl, const char* lit) {
 
 static const char* const NAMES[] = {"proyecto", "project", "mapa", "map", "grep", "grep", "aplicar", "apply",
                                     "empaquetar", "zip", "auto", "limite", "limit", "proyectos", "projects",
-                                    "instrucciones", "instructions", "poke", "parchear", "errores", "errors", "trucos", "cheats", "deshacer", "undo", "verificar", "verify", NULL};
+                                    "instrucciones", "instructions", "poke", "parchear", "errores", "errors", "trucos", "cheats", "deshacer", "undo", "verificar", "verify", "pokebits", "checksum", NULL};
 
 // Which command (index into NAMES) and where its arguments start. -1 when text is none of them.
 static int parse(const char* text, const char** args) {
@@ -412,6 +412,92 @@ static int do_poke(const char* args, char* note, int nm) {
     return r == 0;
 }
 
+// phase 13: /pokebits OFFSET:BIT WIDTH VALUE ORDER FILE [zip] writes name-mod.zip with that bit field changed (bitscan.h).
+static int do_pokebits(const char* args, char* note, int nm) {
+    char tk[6][120];
+    int nt = 0;
+    const char* p = args;
+    while (*p && nt < 6) {
+        while (*p == ' ' || *p == '`') p++;
+        if (!*p || *p == '\n') break;
+        int k = 0;
+        while (*p && *p != ' ' && *p != '\n' && k < 119) tk[nt][k++] = *p++;
+        while (k > 0 && (tk[nt][k - 1] == '`' || tk[nt][k - 1] == '.')) k--;
+        tk[nt++][k] = 0;
+    }
+    if (nt < 5) {
+        snprintf(note, nm, "Usage: /pokebits OFFSET:BIT WIDTH VALUE ORDER FILE [zip]   e.g. /pokebits 0x3A41F:5 17 100000 lsb DATA save.zip   (OFFSET:BIT = the byte and the bit inside it, counted from the lowest bit for lsb or the highest for msb, as the compare and the search say; WIDTH in bits). It writes a NEW zip (name-mod.zip); the original is never touched.");
+        return 0;
+    }
+    char zip[96], sugg[200];
+    if (nt >= 6) {
+        if (!files_resolve_zip(tk[5], zip, sizeof(zip), sugg, sizeof(sugg))) {
+            snprintf(note, nm, "No such zip: %.60s (%s)", tk[5], sugg);
+            return 0;
+        }
+    } else snprintf(zip, sizeof(zip), "%s", files_project());
+    if (!zip[0]) {
+        snprintf(note, nm, "Which zip? Name it at the end (/pokebits ... FILE save.zip) or open it first with @save.zip.");
+        return 0;
+    }
+    char stem[96], src[220], dst[220];
+    snprintf(stem, sizeof(stem), "%s", zip);
+    int sl = (int)strlen(stem);
+    if (sl > 4 && !strcasecmp(stem + sl - 4, ".zip")) stem[sl - 4] = 0;
+    if (strlen(stem) > 4 && !strcmp(stem + strlen(stem) - 4, "-mod")) stem[strlen(stem) - 4] = 0;
+    for (char* c = stem; *c; c++)
+        if (*c == '/') *c = '_';
+    snprintf(src, sizeof(src), FILES_DIR "/%s", zip);
+    snprintf(dst, sizeof(dst), FILES_DIR "/%s-mod.zip", stem);
+    int r = bin_pokebits(src, dst, tk[4], tk[0], tk[1], tk[2], tk[3], note, nm);
+    if (r == 0) {
+        char lg[300];
+        snprintf(lg, sizeof(lg), "POKEBITS %.60s %.60s %.20s %.8s %.20s %.4s -> %.80s\n", zip, tk[4], tk[0], tk[1], tk[2], tk[3], dst);
+        log_change(lg);
+    }
+    return r == 0;
+}
+
+// phase 13: /checksum OFFSET FILE [zip]: which checksum is stored at that offset (the report goes with the next message).
+static void do_checksum(const char* args, char* note, int nm) {
+    char tk[3][120];
+    int nt = 0;
+    for (const char* p = args; *p && nt < 3;) {
+        while (*p == ' ' || *p == '`') p++;
+        int k = 0;
+        while (*p && *p != ' ' && *p != '\n' && k < 119) tk[nt][k++] = *p++;
+        while (k > 0 && (tk[nt][k - 1] == '`' || tk[nt][k - 1] == '.')) k--;
+        if (k) tk[nt++][k] = 0;
+        if (*p == '\n') break;
+    }
+    if (nt < 2) {
+        snprintf(note, nm, "Usage: /checksum OFFSET FILE [zip]   e.g. /checksum 0x40 DATA save.zip   (OFFSET = where the 4 bytes of the checksum are: a spot that changes at the start or the end of the file every time you save, see @before.zip~after.zip).");
+        return;
+    }
+    char zip[96], sugg[200];
+    if (nt >= 3) {
+        if (!files_resolve_zip(tk[2], zip, sizeof(zip), sugg, sizeof(sugg))) {
+            snprintf(note, nm, "No such zip: %.60s (%s)", tk[2], sugg);
+            return;
+        }
+    } else snprintf(zip, sizeof(zip), "%s", files_project());
+    if (!zip[0]) {
+        snprintf(note, nm, "Which zip? Name it at the end (/checksum OFFSET FILE save.zip) or open it first with @save.zip.");
+        return;
+    }
+    char src[220];
+    snprintf(src, sizeof(src), FILES_DIR "/%s", zip);
+    static char rep[3000];
+    int n = bin_checksum(src, tk[1], tk[0], rep, sizeof(rep));
+    if (n == -2) snprintf(note, nm, "\"%s\" is not an offset (use 0x40 or 64).", tk[0]);
+    else if (n == -3) snprintf(note, nm, "%s is not in the zip.", tk[1]);
+    else if (n < 0) snprintf(note, nm, "Cannot read %s.", zip);
+    else {
+        pend("[Checksum]", rep, n);
+        snprintf(note, nm, "%.700s\nThe report also goes with your next message.", rep);
+    }
+}
+
 int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
     load();
     const char* args;
@@ -480,6 +566,11 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
                     if (!pk && !note[0]) snprintf(note, nm, "The /poke line of the answer could not be run.");
                     return 0;
                 }
+                if (!strncmp(q, "/pokebits ", 10)) {   // phase 13: a bit field
+                    pk = do_pokebits(q + 10, note, nm);
+                    if (!pk && !note[0]) snprintf(note, nm, "The /pokebits line of the answer could not be run.");
+                    return 0;
+                }
             }
         }
         (void)pk;
@@ -540,6 +631,10 @@ int devcmd_run(const char* text, const char* last_ai, char* note, int nm) {
         snprintf(note, nm, "Instructions of %s saved (%d chars). They go with your next message; a new chat (Triangle) puts them in the system prompt.", ws_name(), (int)strlen(ins));
     } else if (c == 17 || c == 18) {   // /poke
         do_poke(args, note, nm);
+    } else if (c == 27) {   // /pokebits (phase 13)
+        do_pokebits(args, note, nm);
+    } else if (c == 28) {   // /checksum (phase 13)
+        do_checksum(args, note, nm);
     } else if (c == 19 || c == 20) {   // /errores [log] [repo.zip]: the errors of a build log with the code around them
         char tk[2][120];
         int nt = 0;
@@ -749,7 +844,8 @@ const char* devcmd_system_prompt(void) {   // (the same text as docs/garlic_syst
            "- Hay una API local (OpenAI, Ollama, KoboldCpp) y una página de chat: /api muestra las direcciones.\n"
            "\n"
            "PARTIDAS GUARDADAS Y BINARIOS (no son texto: no inventes su contenido)\n"
-           "- La app lee los bytes: @zip lista el zip; @zip:archivo informe; @zip:archivo:0x100-0x1ff hex; @zip?=12500 dónde está ese número; @antes.zip~despues.zip qué bytes cambiaron. Antes de editar una partida, /trucos CUSAxxxxx.\n"
-           "- Para cambiar un valor: busca @zip?=VALOR; si sale en varios sitios, que el usuario lo cambie en el juego, guarde otra partida y compara con ~: el offset que pasó del valor viejo al nuevo es el bueno. Termina con UNA línea sola: /poke OFFSET TIPO VALOR ARCHIVO (ej. /poke 0x40 u32 999999 SAVEDATA/slot0.dat); el usuario escribe /aplicar y se crea nombre-mod.zip sin tocar el original.\n"
-           "- TIPO: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64. Si los bytes parecen aleatorios (cifrado o comprimido), dilo: no se puede editar. Una suma de comprobación puede hacer que el juego rechace la partida: no prometas que funcione.\n";
+           "- La app lee los bytes: @zip lista el zip; @zip:archivo informe (zonas, textos, firmas; en archivos grandes lee TODO el archivo); @zip:archivo:0x100-0x1ff hex; @zip?=12500 dónde está ese número (bytes); @zip:archivo?bits=12500 lo mismo por BITS (también encuentra campos empaquetados en bits; con +0xOFFSET solo cerca de ese offset); @antes.zip~despues.zip qué cambió (cada cambio leído como campo de bits); @antes.zip~despues.zip?5000/5100 con los valores que el juego mostró antes y después: da el campo exacto. Antes de editar una partida, /trucos CUSAxxxxx.\n"
+           "- Método: (1) @zip:archivo para ver si es editable (el informe dice si está cifrado o es texto/bits; un inicio aleatorio NO significa que todo lo sea). (2) Si un número de 24 bits o más sale 1 o 2 veces con ?bits=, es probablemente el campo; si sale muchas veces (números pequeños), pide al usuario que haga UN solo cambio en el juego (el menor posible), guarde otra partida de inmediato y compara con ~ y los dos valores: ?VIEJO/NUEVO. (3) Cambios al inicio o al final del archivo que cambian siempre son contadores o una suma de comprobación: /checksum OFFSET ARCHIVO dice si es CRC32, Adler32 o una suma.\n"
+           "- Termina con UNA línea sola. Para bytes enteros: /poke OFFSET TIPO VALOR ARCHIVO (ej. /poke 0x40 u32 999999 SAVEDATA/slot0.dat). Para un campo de bits: /pokebits OFFSET:BIT ANCHO VALOR ORDEN ARCHIVO (ej. /pokebits 0x3A41F:5 17 100000 lsb DATA; ORDEN lsb o msb como lo diga la búsqueda o la comparación). El usuario escribe /aplicar y se crea nombre-mod.zip sin tocar el original.\n"
+           "- TIPO: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64. Si casi todo parece aleatorio (cifrado o comprimido), dilo: no se puede editar. Una suma de comprobación o firma puede hacer que el juego rechace la partida: no prometas que funcione.\n";
 }

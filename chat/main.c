@@ -33,6 +33,7 @@
 #include "pyrun.h"
 #include "ui.h"
 #include "chatlog.h"
+#include "ctxcache.h"
 #include <stdbool.h>   // (orbis/Keyboard.h uses bool)
 #include <orbis/Keyboard.h>
 #include "input.h"   // USB keyboard and mouse (from the psbrowser)
@@ -804,6 +805,9 @@ static void start_turn(const char* user_text) {
         n = encode_into(ids, n, max - 8, turn_files);
         n = encode_into(ids, n, max - 8, "\n");
     }
+    // what comes before the question, when this is a new conversation that opens with files: the same every time for the
+    // same files, so its state can come from /data/garlic_cache instead of being read again (ctxcache.h)
+    int pre_n = pos == 0 && turn_files && turn_files[0] ? n : 0;
     n = encode_into(ids, n, max - 8, user_text);
     ids[n++] = IM_END;
     n = encode_into(ids, n, max, "\n");
@@ -863,14 +867,30 @@ static void start_turn(const char* user_text) {
     if (in_voice_mode) show_voice(VM_THINK);
     else show_chat();
     double t0 = now();
+    int base_n = 0;   // tokens of ids the engine already has: put back from the disk cache, or run now to be saved
+    if (pre_n >= CTXCACHE_MIN_TOKENS && pre_n + 4 < head && ctxcache_enabled()) {
+        int cr = ctxcache_load(&eng, ids, pre_n);
+        if (cr == 1) {
+            engine_spec_follow(&eng, (uint32_t)pre_n);
+            static char cache_toast[80];
+            snprintf(cache_toast, sizeof(cache_toast), "Context restored from disk (%d tokens)", pre_n);
+            toast_text = cache_toast;
+            toast_until = now() + 4.0;
+        } else {
+            if (cr < 0) engine_reset(&eng);   // it failed halfway: the state is garbage
+            if (engine_run(&eng, ids, pre_n, 0, view.temperature, seed, &next_token)) show_error(eng.error);
+            ctxcache_save(&eng, ids, pre_n);
+        }
+        base_n = pre_n;
+    }
     if (think) {   // the prompt up to "assistant\n", the DeltaNet state saved there, then <think>\n
-        if (engine_run(&eng, ids, head, pos, view.temperature, seed++, &next_token)) show_error(eng.error);
+        if (engine_run(&eng, ids + base_n, head - base_n, pos + base_n, view.temperature, seed++, &next_token)) show_error(eng.error);
         think_saved = think_save();
         think_pos0 = pos + head;
         if (engine_run(&eng, ids + head, n - head, pos + head, THINK_T, seed++, &next_token)) show_error(eng.error);
     } else
     {
-        if (engine_run(&eng, ids, n, pos, view.temperature, seed++, &next_token)) show_error(eng.error);
+        if (engine_run(&eng, ids + base_n, n - base_n, pos + base_n, view.temperature, seed++, &next_token)) show_error(eng.error);
     }
     say("prompt of %d tokens in %.2f s (GPU %.2f s), first token %u", n, now() - t0, eng.last_gpu_seconds, next_token);
     view.reading = 0;

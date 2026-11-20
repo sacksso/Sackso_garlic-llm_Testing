@@ -35,6 +35,21 @@ int bin_zip_compare(const char* za, const char* zb, char* out, int max);
 int bin_poke(const char* src, const char* dst, const char* entry, const char* off, const char* type, const char* value,
              char* msg, int msg_max);
 
+// Like bin_zip_compare; hint (or NULL) is "OLD/NEW" (or OLD>NEW), the values the game showed before and after: the exact bit field that
+// changed from one to the other is named (bitscan.h). Entries bigger than BITS_BIG are compared as bit fields.
+int bin_zip_compare_hint(const char* za, const char* zb, const char* hint, char* out, int max);
+
+// Phase 13: bit-level search of a number (spec "5000" or "5000+0x3A41F") in one file of a zip, whatever its size. Returns the
+// length or < 0 (-1 zip, -2 bad value, -3 no such file, -4 cannot extract).
+int bin_zip_bits(const char* zip, const char* file, const char* spec, char* out, int max);
+
+// Which checksum is stored at byte offset off of file (bitscan.h). Same returns.
+int bin_checksum(const char* zip, const char* file, const char* off, char* out, int max);
+
+// Writes dst (a NEW zip) with width bits at where ("0x3A41F:5" = byte and bit) of `entry` set to value; order lsb or msb.
+// Returns 0 on success or < 0 (msg says why).
+int bin_pokebits(const char* src, const char* dst, const char* entry, const char* where, const char* width, const char* value, const char* order, char* msg, int msg_max);
+
 // "12500" or "0x1F4" (also with a sign) -> number; returns 1 when the whole text was a number.
 int bin_parse_num(const char* s, long long* v);
 

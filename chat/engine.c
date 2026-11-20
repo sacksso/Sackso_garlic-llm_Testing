@@ -1799,3 +1799,13 @@ int asr_reload(Engine* e) {
 #ifdef GARLIC_SPEC
 #include "engine_spec.inc"
 #endif
+
+void engine_spec_follow(Engine* e, uint32_t at) {
+    (void)e;
+    (void)at;
+#ifdef GARLIC_SPEC
+    g_spec.pbase = at;
+    g_spec.on = g_spec.ready;
+    g_spec.drafted = 0;
+#endif
+}

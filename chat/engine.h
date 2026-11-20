@@ -242,6 +242,10 @@ void engine_reset(Engine* e);
 // (save 0), so that the conversation can go back to the position where they were saved. 0 = done.
 uint64_t engine_state_size(const Engine* e);
 int engine_state_copy(Engine* e, uint64_t buf, int save);
+
+// After a conversation's state was put back from disk at position pos (ctxcache.c): the MTP head, whose own cache was
+// not saved, follows the conversation from there (it sees only what comes after, like after the voice mode).
+void engine_spec_follow(Engine* e, uint32_t pos);
 // Load Parakeet into the GPU memory still free (after engine_init). 0 if ready, -1 if missing or too big.
 int asr_init(Engine* e, const char* assets_dir);
 int engine_flex_test(Engine* e);
