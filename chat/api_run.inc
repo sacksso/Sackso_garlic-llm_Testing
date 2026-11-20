@@ -140,8 +140,12 @@ static int api_encode_raw(char* text) {
 
 // Builds the prompt: a chat's messages with the assistant's turn opened, or the game's own text. Returns the number
 // of ids, or -1 if it does not fit. *snap: how many of them are history (the saved state may stand there).
+static Profile api_prof;               // phase 13: the profile this request uses (profiles.h)
+static const char* api_prof_text;      // its system text, or NULL when the request uses none
+
 static int api_prompt(const JNode* pool, GenRequest* g, int* snap) {
     int n = 0;
+    int prof_pending = api_prof_text != NULL;   // the profile's text goes first, in the system message
     if (g->raw) {
         if (g->prompt.n > API_MAX_TEXT) return -1;
         n = api_encode_raw(g->prompt.p ? g->prompt.p : (char*)"");
@@ -171,12 +175,39 @@ static int api_prompt(const JNode* pool, GenRequest* g, int* snap) {
             }
             if (strcmp(role, "system") && strcmp(role, "assistant") && strcmp(role, "user") && strcmp(role, "tool"))
                 strcpy(role, "user");
+            if (prof_pending) {
+                prof_pending = 0;
+                if (!strcmp(role, "system")) {   // the game's system message follows the profile's text, in the same message
+                    Sb merged;
+                    sb_init(&merged);
+                    sb_str(&merged, api_prof_text);
+                    sb_str(&merged, "\n\n");
+                    if (content.p) sb_add(&merged, content.p, content.n);
+                    n = merged.oom || !merged.p ? n : api_push_msg(n, "system", merged.p);
+                    sb_free(&merged);
+                    sb_free(&content);
+                    continue;
+                }
+                n = api_push_msg(n, "system", api_prof_text);
+            }
             n = api_push_msg(n, role, content.p);
             sb_free(&content);
         }
     } else {   // Ollama /api/generate without raw: the system text and the prompt as messages
         if (g->system.n + g->prompt.n > API_MAX_TEXT) return -1;
-        if (g->system.n) n = api_push_msg(n, "system", g->system.p);
+        if (prof_pending && g->system.n) {
+            Sb merged;
+            sb_init(&merged);
+            sb_str(&merged, api_prof_text);
+            sb_str(&merged, "\n\n");
+            sb_add(&merged, g->system.p, g->system.n);
+            if (!merged.oom && merged.p) n = api_push_msg(n, "system", merged.p);
+            sb_free(&merged);
+        } else if (prof_pending) {
+            n = api_push_msg(n, "system", api_prof_text);
+        } else if (g->system.n) {
+            n = api_push_msg(n, "system", g->system.p);
+        }
         n = api_push_msg(n, "user", g->prompt.p);
     }
     if (n > 16384 - 64) return -1;
@@ -195,6 +226,32 @@ static void api_job(ApiJob* job) {
         api_error(kind, job->fd, "HTTP/1.1 400 Bad Request", err ? err : "Out of memory.", "invalid_request_error",
                   "invalid_body");
         return;
+    }
+    // Phase 13: a profile (profiles.h). The request's "model" names it, or /data/garlic_api_profile.txt does when the
+    // request names none; its text goes before the game's own system message, and its temperature and length stand in
+    // for the ones the game did not send.
+    api_prof_text = NULL;
+    {
+        char model_req[96] = "", pname[40];
+        int mn = json_get(pool, g.root, "model");
+        if (mn >= 0 && pool[mn].type == J_STR) {
+            Sb ms;
+            sb_init(&ms);
+            json_str_sb(pool, mn, &ms);
+            if (ms.p && !ms.oom) snprintf(model_req, sizeof(model_req), "%.95s", ms.p);
+            sb_free(&ms);
+        }
+        if ((profile_from_model(model_req, pname, sizeof(pname)) || profile_api_default(pname, sizeof(pname))) &&
+            profile_find(pname, &api_prof)) {
+            static const char* const temp_keys[] = {"temperature", NULL};
+            static const char* const len_keys[] = {"max_tokens", "max_length", "num_predict", NULL};
+            if (api_prof.text[0] && !g.raw) api_prof_text = api_prof.text;
+            if (api_prof.temperature >= 0 && !api_gen_given(pool, &g, temp_keys)) g.temperature = api_prof.temperature;
+            if (api_prof.max_tokens > 0 && !api_gen_given(pool, &g, len_keys)) g.max_tokens = api_prof.max_tokens;
+            for (int i = 0; i < api_prof.n_stops && !g.n_stops && g.n_stops < GEN_STOPS; i++)
+                snprintf(g.stops[g.n_stops++], GEN_STOP_LEN, "%s", api_prof.stops[i]);
+            say("api: profile %s%s", api_prof.name, api_prof_text ? "" : " (sampling only: the prompt is raw text)");
+        }
     }
     int snap = 0;
     int n = api_prompt(pool, &g, &snap);

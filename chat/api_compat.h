@@ -42,6 +42,10 @@ typedef struct {
 int api_gen_parse(int kind, const char* body, size_t len, JNode* pool, int max, GenRequest* g, const char** err);
 void api_gen_free(GenRequest* g);
 
+// 1 when the request itself carries a number under one of these names (NULL-ended list), at the top level or inside
+// Ollama's "options". A profile (profiles.h) fills in the temperature and the length only when the game gave none.
+int api_gen_given(const JNode* pool, const GenRequest* g, const char* const* keys);
+
 // Stop sequences. api_find_stop: where the first stop sequence begins in text[0..n) (-1 if none), looking only at
 // matches that reach past `from` (the bytes before it were already checked). api_stop_hold: how many bytes of the
 // newest text a stream must keep back (a stop sequence may be half written).

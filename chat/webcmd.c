@@ -662,6 +662,7 @@ int webcmd_run(const char* t, char* note, int nm) {
                  "CHECK\n/verificar [file]  checks a file (YAML/workflows, JSON, Python, shell, C, Markdown); the agent does it after each edit   @zip!name  every place that uses a name\n"
                  "SAVED GAMES (binary files)\n@save.zip:file (report)   @save.zip:file:0x100-0x1ff (hex)   @save.zip?=12500 (find a number)   @before.zip~after.zip (what changed)   /poke OFFSET TYPE VALUE FILE [zip]\n"
                  "PROGRESS\n/progreso  the model writes its notes, saved   |   /retomar  fresh context from them\n"
+                 "PROFILES\n/perfil  list   |   /perfil narrador|personaje|personaje-json|NAME  new chat in that voice   |   /perfil off\n"
                  "API (phone, PC, games)\n/api  addresses   |   /api on|off   |   /cache on|off   |   /puerto N\n"
                  "OTHER\n/estado  state   |   /limpiar  drop fetched text   |   /red on|off\n"
                  "Short forms: /b /o /w /u /g");

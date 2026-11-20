@@ -162,6 +162,20 @@ void api_gen_free(GenRequest* g) {
     sb_free(&g->system);
 }
 
+int api_gen_given(const JNode* pool, const GenRequest* g, const char* const* keys) {
+    if (g->root < 0) return 0;
+    int o = json_get(pool, g->root, "options");
+    for (int i = 0; keys[i]; i++) {
+        int n = json_get(pool, g->root, keys[i]);
+        if (n >= 0 && pool[n].type == J_NUM) return 1;
+        if (is_obj(pool, o)) {
+            n = json_get(pool, o, keys[i]);
+            if (n >= 0 && pool[n].type == J_NUM) return 1;
+        }
+    }
+    return 0;
+}
+
 // ---- stop sequences ------------------------------------------------------------------------------------------------
 
 long api_find_stop(const char* text, size_t n, size_t from, const GenRequest* g) {

@@ -42,6 +42,7 @@
 #include "devcmd.h"   // phase 7: /proyecto /mapa /grep /aplicar /empaquetar /auto /limite and the agent
 #include "webcmd.h"    // /red /gh /url /web: network commands (off by default), and what they fetched
 #include "workspace.h"   // phase 9: projects (a folder of files + instructions + progress for each)
+#include "profiles.h"   // phase 13: named ways of answering (/perfil; the API's "model" can name one)
 #include "progress.h"   // phase 8: progress kept outside the model's memory (/progreso, /retomar, the checkpoint before a restart)
 #include "ask.h"       // /ok: bring what the model asked for in its last answer (@zip:path, /gh, /url)
 
@@ -694,7 +695,11 @@ static char sysp_file[4096];
 
 static char sysp_ws[6144];   // phase 9: the prompt with the block of the active project at the end
 
+static Profile g_prof;    // phase 13: the profile of this chat (/perfil); g_prof_on = 0: none, the usual prompts
+static int g_prof_on;
+
 static const char* system_prompt_base(void) {
+    if (g_prof_on && g_prof.text[0]) return g_prof.text;
     int f = open("/data/garlic_system.txt", O_RDONLY);
     if (f >= 0) {
         int n = read(f, sysp_file, sizeof(sysp_file) - 1);
@@ -713,7 +718,7 @@ static const char* system_prompt_base(void) {
 static const char* system_prompt_text(void) {
     const char* base = system_prompt_base();
     char blk[1400];
-    if (ws_prompt_block(blk, sizeof(blk)) > 0) {   // the project's name, how to hand over files, its instructions
+    if (!g_prof_on && ws_prompt_block(blk, sizeof(blk)) > 0) {   // the project's name, how to hand over files, its instructions
         snprintf(sysp_ws, sizeof(sysp_ws), "%s\n\n%s", base, blk);
         return sysp_ws;
     }
@@ -1451,6 +1456,49 @@ static void cp_finish(void) {
     agent_msg = 0;
 }
 
+// /perfil: a profile for this chat (profiles.h). The system prompt changes, so a new conversation starts.
+static void chat_restart(void) {
+    msgs_clear();
+    progress_clear();
+    pos = 0;
+    need_close = 0;
+    sys_pre = 0;
+    hist_n = hist_done = 0;
+    thinking = think_turn = 0;
+    view.scroll = 0;
+}
+
+static void profile_command(const char* arg) {
+    char list[1000], m[1300];
+    if (!arg[0]) {
+        profile_list(list, sizeof(list));
+        snprintf(m, sizeof(m), "Profile: %s\n%s\n/perfil NAME = new chat with it   /perfil off = the programming prompt again.\nYour own: /data/garlic_profiles/NAME.txt",
+                 g_prof_on ? g_prof.name : "none (programming)", list);
+        note_msg(m);
+        return;
+    }
+    if (!strcmp(arg, "off") || !strcmp(arg, "ninguno") || !strcmp(arg, "programador")) {
+        g_prof_on = 0;
+        view.temperature = devcmd_auto_on() || files_project()[0] || ws_name()[0] ? 0.3f : 0.7f;
+        chat_restart();
+        note_msg("No profile: the programming prompt again. New chat.");
+        return;
+    }
+    Profile p;
+    if (!profile_find(arg, &p)) {
+        snprintf(m, sizeof(m), "No profile called \"%.30s\". /perfil lists them.", arg);
+        note_msg(m);
+        return;
+    }
+    g_prof = p;
+    g_prof_on = p.text[0] != 0;
+    if (p.temperature >= 0) view.temperature = (float)p.temperature;
+    chat_restart();
+    snprintf(m, sizeof(m), "Profile %s: new chat. Temperature %.1f (L2/R2 change it). /perfil off goes back to programming.", p.name, view.temperature);
+    note_msg(m);
+    say("profile: %s (temperature %.2f)", p.name, view.temperature);
+}
+
 // A message the user wrote: @name words bring the files of /data/garlic_files along (files.h); a lone @ lists them.
 static void send_text(const char* text) {
     static char ctx[40000];   // (about 15K tokens at most: ids[] in start_turn holds 15000)
@@ -1459,6 +1507,11 @@ static void send_text(const char* text) {
     int ask_plain = ask_is_plain_yes(text);
     if (!agent_msg && !devcmd_is_cmd(text) && !webcmd_is_cmd(text)) devcmd_user_turn();
     if (!agent_msg && !ask_plain && !ask_is_cmd(text)) progress_goal(text);   // phase 8: the task, kept outside the model
+    char parg[48];
+    if (profile_is_cmd(text, parg, sizeof(parg))) {
+        profile_command(parg);
+        return;
+    }
     int pc = progress_is_cmd(text);
     if (pc == 1) {   // /progreso: the model writes its notes now, they are saved
         if (pos == 0 || n_msgs == 0) note_msg("Nothing to save yet: there is no conversation.");
@@ -2544,7 +2597,7 @@ int main(void) {
             if (cp_phase) {   // phase 8: the model's notes are ready
                 cp_finish();
                 prev = read_buttons();
-            } else if (n_msgs > 0 && msgs[n_msgs - 1].who == MSG_AI) {
+            } else if (n_msgs > 0 && msgs[n_msgs - 1].who == MSG_AI && !g_prof_on) {   // (not while a story profile is active)
                 int go = devcmd_agent_step(msgs[n_msgs - 1].text, webcmd_net_on(), nx, sizeof(nx), no, sizeof(no));
                 if (no[0]) {
                     say("agent: %.200s", no);
