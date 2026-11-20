@@ -38,7 +38,7 @@ $W/filepick_test
 # phase 9 through the commands
 mkdir -p $W/d9/files $W/d9/ws
 cp $W/t.zip $W/d9/files/repo.zip
-gcc $FL -DFILES_DIR="\"$W/d9/files\"" -DDEV_FLAG_FILE="\"$W/d9/dev.txt\"" -DUNDO_DIR="\"$W/d9/undo\"" -DWS_ROOT="\"$W/d9/ws/projects\"" -DWS_OUT_ROOT="\"$W/d9/files/out\"" -DWS_STATE_FILE="\"$W/d9/ws/proyecto.txt\"" -DWS_LEGACY_PROGRESS="\"$W/d9/ws/progreso.txt\"" tests/dev9_test.c chat/devcmd.c chat/files.c chat/repomap.c chat/zipread.c chat/zipwrite.c chat/htmltext.c chat/progress.c chat/patch.c chat/ask.c chat/workspace.c chat/outfiles.c chat/bintools.c chat/buildlog.c chat/ghinfo.c chat/undo.c chat/verify.c -o $W/dev9_test && $W/dev9_test
+gcc $FL -DFILES_DIR="\"$W/d9/files\"" -DDEV_FLAG_FILE="\"$W/d9/dev.txt\"" -DUNDO_DIR="\"$W/d9/undo\"" -DWS_ROOT="\"$W/d9/ws/projects\"" -DWS_OUT_ROOT="\"$W/d9/files/out\"" -DWS_STATE_FILE="\"$W/d9/ws/proyecto.txt\"" -DWS_LEGACY_PROGRESS="\"$W/d9/ws/progreso.txt\"" tests/dev9_test.c chat/devcmd.c chat/files.c chat/repomap.c chat/zipread.c chat/zipwrite.c chat/htmltext.c chat/progress.c chat/patch.c chat/ask.c chat/workspace.c chat/outfiles.c chat/bintools.c chat/bitscan.c chat/buildlog.c chat/ghinfo.c chat/undo.c chat/verify.c -lm -o $W/dev9_test && $W/dev9_test
 # the API: protocols (Kobold, Ollama, OpenAI text), stop sequences, prefix cache
 gcc $FL tests/api_proto_test.c chat/api_proto.c -o $W/api_proto_test && $W/api_proto_test
 gcc $FL tests/api_compat_test.c chat/api_compat.c chat/api_proto.c -o $W/api_compat_test && $W/api_compat_test
@@ -46,4 +46,10 @@ gcc $FL -DPROFILES_DIR="\"$W/profiles\"" -DPROFILE_API_FILE="\"$W/api_profile.tx
 gcc $FL -DPROFILES_DIR="\"$W/profiles2\"" -DPROFILE_API_FILE="\"$W/api_profile2.txt\"" tests/profiles_test.c chat/profiles.c -o $W/profiles_test && $W/profiles_test > /dev/null && echo profiles_test: ok
 python3 tests/savetool_test.py | tail -1
 gcc $FL tests/verify_test.c chat/verify.c -o $W/verify_test && $W/verify_test
+# context cache on disk (a fake engine in malloc'd memory)
+mkdir -p $W/cc
+gcc $FL -DCTXCACHE_HOST -DCTXCACHE_DIR="\"$W/cc/cache\"" -DCTXCACHE_OFF_FILE="\"$W/cc/off.txt\"" tests/ctxcache_test.c chat/ctxcache.c -o $W/ctxcache_test && $W/ctxcache_test | tail -1
+# phase 13: saved games at the level of bits (a 9 MB synthetic save, bit-packed field, CRC32)
+python3 tests/bits_test.py
 rm -rf $W
+
