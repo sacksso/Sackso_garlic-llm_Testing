@@ -46,6 +46,7 @@ static int fail_engine_at = -1;   // the engine fails on this call (-1: never)
 static int spec_on;               // the mock MTP head is on: a step keeps up to spec_keep tokens of its draft
 static int spec_keep = 2;
 static int fed;                   // tokens of the reply fed to the model
+static float last_temp;           // the temperature of the last prompt that was read
 // what main.c shows of a job: begun and ended (they must pair), and Circle held from stop_at tokens on (-1: never)
 static int chat_begun, chat_ended, chat_replies, stop_at = -1;
 
@@ -134,13 +135,13 @@ static int tok_piece(const Tokenizer* t, uint32_t id, const uint8_t** bytes) {
 
 static int engine_run(MockEngine* e, const uint32_t* tokens, int n, int pos0, float temperature, unsigned sd,
                       uint32_t* next) {
-    (void)temperature;
     (void)sd;
     engine_calls++;
     if (engine_calls == fail_engine_at) {
         snprintf(e->error, sizeof(e->error), "mock GPU fault");
         return -1;
     }
+    if (n > 1) last_temp = temperature;
     if (n > 1) read_total += n, prompt_len_seen = n;   // the prompt (fed in one go, or its two parts with the cache)
     else fed++;
     if (pos0 != next_pos) pos_errors++;
@@ -177,6 +178,7 @@ static int engine_spec_step(MockEngine* e, uint32_t tk, int pos0, float temperat
     return 0;
 }
 
+#include "profiles.h"
 #include "api_run.inc"
 
 // ---- test helpers --------------------------------------------------------------------------------------------------
@@ -537,6 +539,67 @@ static void test_utf8(void) {
     CHECK(api_utf8_whole((const uint8_t*)"ab", 2) == 2);
 }
 
+// The prompt of the last job as text (one id per byte in the mock): <im_start> is {, <im_end> is }.
+static void prompt_text(char* out, int max) {
+    int k = 0;
+    for (int i = 0; i < prompt_len_seen && k < max - 1; i++) {
+        uint32_t id = api_ids[i];
+        out[k++] = id == IM_START ? '{' : id == IM_END ? '}' : (id >= 1 && id <= 256) ? (char)(id - 1) : '?';
+    }
+    out[k] = 0;
+}
+
+// Phase 13: profiles (profiles.h) in the API.
+static void test_profile(void) {
+    static const uint32_t sc[] = {'O' + 1, 'k' + 1};
+    char txt[3000];
+    system("rm -rf " PROFILES_DIR " " PROFILE_API_FILE "; mkdir -p " PROFILES_DIR);
+    FILE* f = fopen(PROFILES_DIR "/maria.txt", "w");
+    fputs("temperature=1.1\nmax_tokens=33\n---\nEres Maria.", f);
+    fclose(f);
+    int kind0 = job_kind;
+    job_kind = 0;
+    // the profile's text and the game's system message go in ONE system message, the profile's text first; its temperature
+    // stands in for the one the game did not send
+    run_job("{\"model\":\"garlic-9b:maria\",\"messages\":[{\"role\":\"system\",\"content\":\"FICHA: panadera\"},{\"role\":\"user\",\"content\":\"hola\"}]}", sc, 2);
+    prompt_text(txt, sizeof(txt));
+    CHECK(strstr(txt, "{system\nEres Maria.\n\nFICHA: panadera}\n{user\nhola}\n") != NULL);
+    CHECK(strstr(wire, "\"content\":\"Ok\"") != NULL);
+    CHECK(last_temp > 1.09f && last_temp < 1.11f);
+    // no system message from the game: the profile's own comes first
+    run_job("{\"model\":\"maria\",\"messages\":[{\"role\":\"user\",\"content\":\"hola\"}]}", sc, 2);
+    prompt_text(txt, sizeof(txt));
+    CHECK(strstr(txt, "{system\nEres Maria.}\n{user\nhola}\n") != NULL);
+    // what the game sends wins over the profile
+    run_job("{\"model\":\"maria\",\"temperature\":0.2,\"messages\":[{\"role\":\"user\",\"content\":\"hola\"}]}", sc, 2);
+    CHECK(last_temp > 0.19f && last_temp < 0.21f);
+    // a model name that is no profile: the prompt is what it always was
+    run_job("{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hola\"}]}", sc, 2);
+    prompt_text(txt, sizeof(txt));
+    CHECK(strstr(txt, "Maria") == NULL && prompt_len_seen == 29);   // (the same 27 as test_completion, plus two bytes for "hola")
+    CHECK(last_temp > 0.69f && last_temp < 0.71f);
+    // the API's default profile, when the request names none
+    f = fopen(PROFILE_API_FILE, "w");
+    fputs("maria\n", f);
+    fclose(f);
+    run_job("{\"messages\":[{\"role\":\"user\",\"content\":\"hola\"}]}", sc, 2);
+    prompt_text(txt, sizeof(txt));
+    CHECK(strstr(txt, "{system\nEres Maria.}") != NULL);
+    // Ollama /api/generate: its system text is merged too
+    job_kind = API_K_OLLAMA_GEN;
+    run_job("{\"system\":\"FICHA\",\"prompt\":\"hola\",\"stream\":false}", sc, 2);
+    prompt_text(txt, sizeof(txt));
+    CHECK(strstr(txt, "{system\nEres Maria.\n\nFICHA}\n{user\nhola}") != NULL);
+    // a raw prompt (KoboldCpp) keeps its text as it is; only the sampling of the profile applies
+    job_kind = API_K_KOBOLD;
+    run_job("{\"prompt\":\"Habla: \"}", sc, 2);
+    prompt_text(txt, sizeof(txt));
+    CHECK(strstr(txt, "Maria") == NULL && last_temp > 1.09f && last_temp < 1.11f);
+    job_kind = kind0;
+    remove(PROFILE_API_FILE);
+    system("rm -rf " PROFILES_DIR);
+}
+
 int main(void) {
     test_utf8();
     for (spec_on = 0; spec_on <= 1; spec_on++) {
@@ -552,6 +615,7 @@ int main(void) {
         test_stop_sequences();
         test_cache();
         test_cache_alternating();
+        test_profile();
         CHECK(pos_errors == 0);            // every token went in at the position after the one before
         CHECK(chat_begun == chat_ended);   // every request that took the screen gave it back
         CHECK(chat_replies <= chat_begun);

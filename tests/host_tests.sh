@@ -42,7 +42,8 @@ gcc $FL -DFILES_DIR="\"$W/d9/files\"" -DDEV_FLAG_FILE="\"$W/d9/dev.txt\"" -DUNDO
 # the API: protocols (Kobold, Ollama, OpenAI text), stop sequences, prefix cache
 gcc $FL tests/api_proto_test.c chat/api_proto.c -o $W/api_proto_test && $W/api_proto_test
 gcc $FL tests/api_compat_test.c chat/api_compat.c chat/api_proto.c -o $W/api_compat_test && $W/api_compat_test
-gcc $FL tests/api_run_test.c chat/api_proto.c chat/api_compat.c -o $W/api_run_test && $W/api_run_test
+gcc $FL -DPROFILES_DIR="\"$W/profiles\"" -DPROFILE_API_FILE="\"$W/api_profile.txt\"" tests/api_run_test.c chat/api_proto.c chat/api_compat.c chat/profiles.c -o $W/api_run_test && $W/api_run_test
+gcc $FL -DPROFILES_DIR="\"$W/profiles2\"" -DPROFILE_API_FILE="\"$W/api_profile2.txt\"" tests/profiles_test.c chat/profiles.c -o $W/profiles_test && $W/profiles_test > /dev/null && echo profiles_test: ok
 python3 tests/savetool_test.py | tail -1
 gcc $FL tests/verify_test.c chat/verify.c -o $W/verify_test && $W/verify_test
 rm -rf $W
