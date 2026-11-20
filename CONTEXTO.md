@@ -49,3 +49,29 @@ Hallazgo: la API no inyecta ningún prompt propio (usa lo que manda el juego); e
 - Pruebas: `tests/profiles_test.c` y `test_profile` en `api_run_test.c` (219 comprobaciones). Compila todo el fork con el toolchain real (36 fuentes). NO probado en consola.
 - Docs: `docs/PERFILES.md`. El muestreo del motor sigue fijo (temperatura + min-p 0.05).
 - Pendiente de otras fases: análisis de binarios grandes (la partida `CUSA57220`, EA FC 27 carrera, `DATA` de 15,7 MB > `BIN_MAX` 6 MB), `/calc`, búsqueda de patrones de bytes, aviso si el agente repite el mismo bloque fallido.
+
+## Fase 13 (sesión 20-nov-2026): guardado de contexto en disco y partidas por bits
+**Todo compila, enlaza y empaqueta con el toolchain real en Linux (Zig 0.13.0 + OpenOrbis v0.5.4) y `tests/host_tests.sh` pasa. NADA de esto se ha probado en la consola.**
+
+### Guardado del contexto en disco (`chat/ctxcache.c/.h`)
+- Una conversación nueva que empieza con archivos (`@zip`, mapa...) tarda minutos en leerlos (prefill ~65 tok/s). `start_turn` (main.c) toma los tokens anteriores a la pregunta (`pre_n`); si hay un snapshot con el mismo hash de ids lo restaura (KV TurboQuant + estados DeltaNet, ~116 MiB) y solo lee la pregunta; si no, lee el prefijo solo y lo guarda en `/data/garlic_cache/<clave>.kv` (máx. 3, el menos usado se borra). Mínimo 1200 tokens. `/data/garlic_cache.txt` con `0` lo apaga.
+- La cabeza MTP no se guarda: `engine_spec_follow(pos)` la hace seguir desde ahí (como tras la voz).
+- Riesgo por verificar en la consola: la CPU lee memoria Garlic; `ctxcache_save` mide 256 KiB antes y no guarda si va a < 15 MiB/s (queda en el log: "ctx cache: not saved..."). Las líneas `ctx cache: saved/restored ... in X s` dan los tiempos reales.
+
+### Archivos grandes y partidas (`chat/bitscan.c/.h`, `zipread.c` streaming, `bintools.c`)
+- Causa de que la IA no encontrara nada en la partida de EA FC: `zip_read` solo descomprimía los primeros 128 KB comprimidos (~0,5 MB de 15,7) y la búsqueda era por bytes. Ahora `zip_stream`/`zip_extract` descomprimen cualquier tamaño en flujo (ventana de 32 KB) a un archivo en `/data/garlic_files/raw/` (caché, máx. 6) y todo se hace con pread. Probado contra zlib (casos sintéticos, bloques stored, parada anticipada) y con la partida real byte a byte.
+- `@zip:archivo` (>192 KB): informe de TODO el archivo (zonas por entropía, textos, firmas, veredicto). La partida real: no está cifrada (4 de 97 bloques parecen aleatorios; el inicio aleatorio no significa nada).
+- `@zip:archivo?bits=NUM[+0xOFFSET]` busca el número en cada bit, en los dos órdenes (LSB-first/MSB-first) y dice cuántos ceros pueden ser del mismo campo. Un NUM de 17 bits tiene cientos de falsos positivos: solo sirve solo para números grandes o con `+OFFSET`.
+- `@antes.zip~despues.zip[?VIEJO/NUEVO]`: cada zona cambiada leída como campo de bits; con los valores que mostró el juego da `FIELD FOUND ... byte 0x2000 bit 3, 17 bits: 100822 -> 77777`. (En un @token no caben `@`, `>` ni `,`: por eso `+` y `/`.)
+- `/pokebits OFFSET:BIT ANCHO VALOR lsb|msb ARCHIVO [zip]` (y desde la respuesta con `/aplicar`) crea `nombre-mod.zip` en flujo, lo relee y compara; nunca toca el original. `/poke` ya funciona en entradas > 6 MB.
+- `/checksum OFFSET ARCHIVO [zip]`: prueba CRC32, Adler32 y sumas sobre 5 rangos y dice si coincide con los 4 bytes de ese offset. Aún no recalcula el valor al editar.
+- Pruebas: `tests/bits_test.py` (partida sintética de 9 MB con campo de 17 y 25 bits, CRC32, 2 órdenes, parches, original intacto, cruce de bloque de 1 MB) y `tests/ctxcache_test.c`.
+- Pendiente / no verificado: que el juego acepte una partida editada (puede haber checksum o firma); el tiempo de descompresión en la PS4 (el decodificador lee bit a bit; la primera vez de un archivo de 15 MB puede tardar varios segundos, luego queda en caché).
+
+### Git
+```
+git add -A
+git commit -m "Fase 13: guardado de contexto en disco y partidas por bits (zip en flujo, ?bits=, diff por bits, /pokebits, /checksum)"
+git push
+```
+
