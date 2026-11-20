@@ -39,3 +39,13 @@
     git add -A
     git commit -m "Fase 12: verificador, @zip!nombre, mapa con Project/CI, errores de workflows"
     git push
+
+## Fase 13: perfiles (programador / narrador / personaje) para el chat y la API
+Pedido: que la IA sea mucho más libre para rolear y generar diálogos de juegos de texto por la API, con perfiles de personalidad, sin perder la programación.
+Hallazgo: la API no inyecta ningún prompt propio (usa lo que manda el juego); el prompt de programación solo se usa en el chat. Así que la "permisividad" se resuelve con perfiles de prompt + muestreo, sin tocar el prompt de programación.
+- `chat/profiles.c/h` (nuevo, C puro): perfiles incluidos (`programador`, `narrador`, `personaje`, `personaje-json`) y propios en `/data/garlic_profiles/NOMBRE.txt` (cabecera `desc=`, `temperature=`, `max_tokens=`, `stop=`, línea `---`, prompt). `profile_find/list/from_model/api_default`, `profile_is_cmd`.
+- `main.c`: `/perfil` (lista), `/perfil NOMBRE` (chat nuevo con ese prompt; fija la temperatura), `/perfil off`. Con perfil activo no se añade el bloque del proyecto y el agente `/auto` no actúa.
+- `api_run.inc`: el perfil lo nombra el campo `model` (`garlic-9b:narrador` o `narrador`) o `/data/garlic_api_profile.txt`; su texto va primero y se fusiona con el mensaje de sistema del juego en UN solo mensaje; temperatura y largo del perfil solo si la petición no los trae (`api_gen_given` en `api_compat.c`); prompts crudos: solo muestreo.
+- Pruebas: `tests/profiles_test.c` y `test_profile` en `api_run_test.c` (219 comprobaciones). Compila todo el fork con el toolchain real (36 fuentes). NO probado en consola.
+- Docs: `docs/PERFILES.md`. El muestreo del motor sigue fijo (temperatura + min-p 0.05).
+- Pendiente de otras fases: análisis de binarios grandes (la partida `CUSA57220`, EA FC 27 carrera, `DATA` de 15,7 MB > `BIN_MAX` 6 MB), `/calc`, búsqueda de patrones de bytes, aviso si el agente repite el mismo bloque fallido.
